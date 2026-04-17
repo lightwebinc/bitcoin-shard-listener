@@ -8,7 +8,8 @@ PROXY_DIR := ../bitcoin-shard-proxy
 PROXY_BIN := $(PROXY_DIR)/bitcoin-shard-proxy
 SEND_BIN  := $(PROXY_DIR)/send-test-frames
 
-.PHONY: all build test test-e2e lint clean docker
+.PHONY: all build test test-e2e lint clean docker FORCE
+FORCE:
 
 all: build
 
@@ -16,22 +17,22 @@ build:
 	mkdir -p $(BUILD_DIR)
 	go build $(LDFLAGS) -o $(BUILD_DIR)/$(BINARY) .
 
-$(BINARY):
+$(BINARY): FORCE
 	go build -buildvcs=false -o $(BINARY) .
 
-$(SINK):
+$(SINK): FORCE
 	go build -buildvcs=false -o $(SINK) ./cmd/sink-test-frames/
 
-$(PROXY_BIN):
+$(PROXY_BIN): FORCE
 	$(MAKE) -C $(PROXY_DIR) bitcoin-shard-proxy
 
-$(SEND_BIN):
-	$(MAKE) -C $(PROXY_DIR) send-test-frames
+$(SEND_BIN): FORCE
+	(cd $(PROXY_DIR) && go build -buildvcs=false -o send-test-frames ./cmd/send-test-frames/)
 
 test:
 	go test -race ./...
 
-test-e2e: $(BINARY) $(SINK) $(PROXY_BIN) $(SEND_BIN)
+test-e2e: $(BINARY) $(SINK) $(SEND_BIN)
 	PATH="$(CURDIR):$(abspath $(PROXY_DIR)):$$PATH" sh test/run-e2e.sh
 
 lint:

@@ -110,11 +110,6 @@ jobs:
       - name: Install curl
         run: sudo apt-get install -y --no-install-recommends curl
 
-      - name: Enable IPv6 multicast on loopback
-        run: |
-          sudo ip link set lo multicast on
-          sudo ip -6 route add ff00::/8 dev lo table local 2>/dev/null || true
-
       - name: E2E test
         working-directory: bitcoin-shard-listener
         run: make test-e2e
