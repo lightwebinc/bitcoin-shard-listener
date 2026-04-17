@@ -1,0 +1,51 @@
+name: CI
+
+on:
+  push:
+    branches: ["main"]
+  pull_request:
+
+jobs:
+  test:
+    name: test
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          path: bitcoin-shard-listener
+
+      - uses: actions/checkout@v4
+        with:
+          repository: lightwebinc/bitcoin-shard-proxy
+          path: bitcoin-shard-proxy
+
+      - uses: actions/setup-go@v5
+        with:
+          go-version-file: bitcoin-shard-listener/go.mod
+          cache-dependency-path: bitcoin-shard-listener/go.sum
+
+      - name: go test
+        working-directory: bitcoin-shard-listener
+        run: go test ./...
+
+  lint:
+    name: lint
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          path: bitcoin-shard-listener
+
+      - uses: actions/checkout@v4
+        with:
+          repository: lightwebinc/bitcoin-shard-proxy
+          path: bitcoin-shard-proxy
+
+      - uses: actions/setup-go@v5
+        with:
+          go-version-file: bitcoin-shard-listener/go.mod
+          cache-dependency-path: bitcoin-shard-listener/go.sum
+
+      - uses: golangci/golangci-lint-action@v8
+        with:
+          working-directory: bitcoin-shard-listener
