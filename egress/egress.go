@@ -27,7 +27,7 @@ import (
 	"net"
 	"time"
 
-	"github.com/lightwebinc/bitcoin-shard-proxy/frame"
+	"github.com/lightwebinc/bitcoin-shard-common/frame"
 )
 
 const tcpWriteDeadline = 5 * time.Second

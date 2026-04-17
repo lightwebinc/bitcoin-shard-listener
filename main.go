@@ -15,7 +15,7 @@ import (
 	"syscall"
 	"time"
 
-	"github.com/lightwebinc/bitcoin-shard-proxy/shard"
+	"github.com/lightwebinc/bitcoin-shard-common/shard"
 
 	"github.com/lightwebinc/bitcoin-shard-listener/config"
 	"github.com/lightwebinc/bitcoin-shard-listener/egress"

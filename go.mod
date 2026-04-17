@@ -3,7 +3,7 @@ module github.com/lightwebinc/bitcoin-shard-listener
 go 1.25.9
 
 require (
-	github.com/lightwebinc/bitcoin-shard-proxy v0.0.0
+	github.com/lightwebinc/bitcoin-shard-common v0.1.0
 	github.com/prometheus/client_golang v1.23.2
 	go.opentelemetry.io/otel v1.42.0
 	go.opentelemetry.io/otel/exporters/otlp/otlpmetric/otlpmetricgrpc v1.42.0
@@ -38,5 +38,3 @@ require (
 	google.golang.org/grpc v1.79.2 // indirect
 	google.golang.org/protobuf v1.36.11 // indirect
 )
-
-replace github.com/lightwebinc/bitcoin-shard-proxy => ../bitcoin-shard-proxy

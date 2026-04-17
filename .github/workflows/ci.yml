@@ -15,26 +15,17 @@ jobs:
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v6
-        with:
-          path: bitcoin-shard-listener
-
-      - uses: actions/checkout@v6
-        with:
-          repository: lightwebinc/bitcoin-shard-proxy
-          path: bitcoin-shard-proxy
 
       - uses: actions/setup-go@v6
         with:
-          go-version-file: bitcoin-shard-listener/go.mod
+          go-version-file: go.mod
 
       - name: go mod tidy check
-        working-directory: bitcoin-shard-listener
         run: |
           go mod tidy
           git diff --exit-code go.mod go.sum
 
       - name: Build
-        working-directory: bitcoin-shard-listener
         run: go build -buildvcs=false ./...
 
   security:
@@ -42,20 +33,12 @@ jobs:
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v6
-        with:
-          path: bitcoin-shard-listener
-
-      - uses: actions/checkout@v6
-        with:
-          repository: lightwebinc/bitcoin-shard-proxy
-          path: bitcoin-shard-proxy
 
       - uses: actions/setup-go@v6
         with:
-          go-version-file: bitcoin-shard-listener/go.mod
+          go-version-file: go.mod
 
       - name: govulncheck
-        working-directory: bitcoin-shard-listener
         run: |
           go install golang.org/x/vuln/cmd/govulncheck@latest
           govulncheck ./...
@@ -65,26 +48,16 @@ jobs:
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v6
-        with:
-          path: bitcoin-shard-listener
-
-      - uses: actions/checkout@v6
-        with:
-          repository: lightwebinc/bitcoin-shard-proxy
-          path: bitcoin-shard-proxy
 
       - uses: actions/setup-go@v6
         with:
-          go-version-file: bitcoin-shard-listener/go.mod
+          go-version-file: go.mod
 
       - name: go vet
-        working-directory: bitcoin-shard-listener
         run: go vet ./...
 
       - name: golangci-lint
         uses: golangci/golangci-lint-action@v7
-        with:
-          working-directory: bitcoin-shard-listener
 
   test:
     name: test

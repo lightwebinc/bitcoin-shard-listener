@@ -3,7 +3,7 @@ package filter_test
 import (
 	"testing"
 
-	"github.com/lightwebinc/bitcoin-shard-proxy/frame"
+	"github.com/lightwebinc/bitcoin-shard-common/frame"
 	"github.com/lightwebinc/bitcoin-shard-listener/filter"
 )
 

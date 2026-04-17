@@ -29,8 +29,8 @@ import (
 	"golang.org/x/net/ipv6"
 	"golang.org/x/sys/unix"
 
-	"github.com/lightwebinc/bitcoin-shard-proxy/frame"
-	"github.com/lightwebinc/bitcoin-shard-proxy/shard"
+	"github.com/lightwebinc/bitcoin-shard-common/frame"
+	"github.com/lightwebinc/bitcoin-shard-common/shard"
 
 	"github.com/lightwebinc/bitcoin-shard-listener/egress"
 	"github.com/lightwebinc/bitcoin-shard-listener/filter"

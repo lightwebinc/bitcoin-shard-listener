@@ -11,7 +11,7 @@
 package filter
 
 import (
-	"github.com/lightwebinc/bitcoin-shard-proxy/frame"
+	"github.com/lightwebinc/bitcoin-shard-common/frame"
 )
 
 // Filter holds the compiled include/exclude sets. Construct with [New].
