@@ -32,8 +32,35 @@ bitcoin-shard-listener \
 
 ```sh
 make build       # -> build/bitcoin-shard-listener
-make test        # run all tests
+make test        # unit tests (race detector)
+make test-e2e    # end-to-end tests (see Testing below)
 make docker      # build Docker image
+```
+
+## Testing
+
+Unit tests cover the filter, NACK tracker, egress, and frame-decode paths:
+
+```sh
+make test
+```
+
+The E2E suite (`test/run-e2e.sh`) starts a listener instance, injects frames
+as unicast UDP directly to the listener's bound port, and verifies delivery via
+a `sink-test-frames` UDP sink. Three scenarios are exercised sequentially:
+
+1. **Basic delivery** — all frames forwarded; verified by sink count and
+   `bsl_frames_forwarded_total` Prometheus metric.
+2. **Shard filter** — `-shard-include 0` passes only the group-0 frame.
+3. **Strip-header** — `-strip-header` forwards raw payload bytes; sink counts
+   raw datagrams.
+
+The suite requires `bitcoin-shard-proxy` checked out at `../bitcoin-shard-proxy`
+(for `send-test-frames`). `make test-e2e` builds all binaries fresh before
+running:
+
+```sh
+make test-e2e
 ```
 
 ## Documentation

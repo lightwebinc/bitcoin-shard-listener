@@ -99,6 +99,14 @@ Filtering is pure (no I/O) and allocation-free on the hot path:
 | `subtree-include` non-empty | only listed IDs accepted |
 | `subtree-exclude` | listed IDs dropped; overrides include |
 
+## V1 frame support
+
+`frame.Decode` accepts both V1 (44-byte header) and V2 (100-byte header) frames.
+V1 frames are decoded with zero-valued `ShardSeqNum`, `SubtreeID`, and
+`SenderID`. Shard filtering applies to V1 frames normally; subtree filtering has
+no effect (zero `SubtreeID` passes all include/exclude checks). Gap tracking is
+skipped for V1 frames because `SenderID` is all-zeros.
+
 ## Egress
 
 A single `egress.Sender` per worker delivers frames to `egress-addr`:
@@ -110,3 +118,17 @@ A single `egress.Sender` per worker delivers frames to `egress-addr`:
 
 `strip-header=true` sends only the raw BSV transaction bytes (frame payload);
 `strip-header=false` (default) sends the complete 100-byte v2 frame verbatim.
+
+## Testing
+
+Worker sockets bind to `[::]:listen-port`, which accepts **both multicast and
+unicast** datagrams. The E2E test suite (`test/run-e2e.sh`) exploits this: it
+injects frames as plain unicast UDP (`[::1]:listen-port`) using
+`send-test-frames` from the proxy repo, bypassing the proxy and the multicast
+fabric entirely. This makes E2E tests self-contained and reliable on any Linux
+host without requiring kernel multicast loopback support on the loopback
+interface.
+
+In production the socket receives multicast frames exclusively; the unicast
+receive path is an implementation property of the `[::]` bind address, not an
+intended ingress path.
