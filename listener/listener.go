@@ -90,7 +90,7 @@ func (w *Worker) Run(ctx context.Context) error {
 	if err != nil {
 		return fmt.Errorf("worker %d: open socket: %w", w.id, err)
 	}
-	defer conn.Close()
+	defer func() { _ = conn.Close() }()
 
 	pc := ipv6.NewPacketConn(conn)
 

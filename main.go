@@ -106,7 +106,7 @@ func run() error {
 		if err != nil {
 			return fmt.Errorf("egress worker %d: %w", i, err)
 		}
-		defer egr.Close()
+		defer func() { _ = egr.Close() }()
 
 		w := listener.New(i, cfg.Iface, cfg.ListenPort, groups, engine, filt, egr, tracker, rec, cfg.Debug)
 		wg.Add(1)
