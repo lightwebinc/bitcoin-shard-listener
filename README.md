@@ -71,7 +71,7 @@ make test-e2e
 
 ## Dependencies
 
-- [`github.com/lightwebinc/bitcoin-shard-common`](https://github.com/lightwebinc/bitcoin-shard-common) — `frame`, `shard` packages
+- [`github.com/lightwebinc/bitcoin-shard-common`](https://github.com/lightwebinc/bitcoin-shard-common) — `frame`, `shard`, `sequence` packages
 - Prometheus client + OpenTelemetry SDK (same versions as proxy)
 - `golang.org/x/net/ipv6` — multicast group join
 - `golang.org/x/sys/unix` — `SO_REUSEPORT`
