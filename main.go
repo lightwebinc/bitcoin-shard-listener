@@ -15,7 +15,7 @@ import (
 	"syscall"
 	"time"
 
-	proxyshard "github.com/lightwebinc/bitcoin-shard-proxy/shard"
+	"github.com/lightwebinc/bitcoin-shard-proxy/shard"
 
 	"github.com/lightwebinc/bitcoin-shard-listener/config"
 	"github.com/lightwebinc/bitcoin-shard-listener/egress"
@@ -60,8 +60,8 @@ func run() error {
 		return fmt.Errorf("metrics: %w", err)
 	}
 
-	// Build the shard engine (mirrors proxy derivation exactly).
-	engine := proxyshard.New(cfg.MCPrefix, cfg.MCMiddleBytes, cfg.ShardBits)
+	// Build the shard engine.
+	engine := shard.New(cfg.MCPrefix, cfg.MCMiddleBytes, cfg.ShardBits)
 
 	// Derive the multicast group addresses to join.
 	groups, err := buildGroups(cfg, engine)
@@ -144,7 +144,7 @@ func run() error {
 
 // buildGroups returns the multicast group addresses this instance should join.
 // If ShardInclude is set, only those groups are joined; otherwise all groups.
-func buildGroups(cfg *config.Config, engine *proxyshard.Engine) ([]*net.UDPAddr, error) {
+func buildGroups(cfg *config.Config, engine *shard.Engine) ([]*net.UDPAddr, error) {
 	var indices []uint32
 	if len(cfg.ShardInclude) > 0 {
 		indices = cfg.ShardInclude

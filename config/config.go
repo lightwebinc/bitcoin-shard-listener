@@ -42,7 +42,7 @@ import (
 	"time"
 )
 
-// Scopes mirrors bitcoin-shard-proxy's scope map.
+// Scopes maps human-readable scope names to their RFC 4291 IPv6 multicast prefixes.
 var Scopes = map[string]uint16{
 	"link":   0xFF02,
 	"site":   0xFF05,

@@ -67,12 +67,11 @@ make test-e2e
 
 - [Architecture](docs/architecture.md)
 - [Configuration reference](docs/configuration.md)
-- [Protocol specification](../bitcoin-shard-proxy/docs/protocol.md)
+- [Protocol specification](https://github.com/lightwebinc/bitcoin-shard-common/blob/main/docs/protocol.md)
 
 ## Dependencies
 
-- `github.com/lightwebinc/bitcoin-shard-proxy` — `frame`, `shard` packages
-  (local `replace` directive; both repos must be checked out side-by-side)
+- [`github.com/lightwebinc/bitcoin-shard-common`](https://github.com/lightwebinc/bitcoin-shard-common) — `frame`, `shard` packages
 - Prometheus client + OpenTelemetry SDK (same versions as proxy)
 - `golang.org/x/net/ipv6` — multicast group join
 - `golang.org/x/sys/unix` — `SO_REUSEPORT`
