@@ -9,9 +9,10 @@ PROXY_BIN := $(PROXY_DIR)/bitcoin-shard-proxy
 SEND_BIN  := $(PROXY_DIR)/send-test-frames
 
 .PHONY: all build test test-e2e lint clean docker FORCE
-FORCE:
 
 all: build
+
+FORCE:
 
 build:
 	mkdir -p $(BUILD_DIR)
