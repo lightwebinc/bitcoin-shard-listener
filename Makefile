@@ -1,7 +1,7 @@
 BINARY    := bitcoin-shard-listener
 SINK      := sink-test-frames
 VERSION   ?= $(shell git describe --tags --dirty 2>/dev/null || echo "dev")
-LDFLAGS   := -ldflags "-X github.com/lightwebinc/bitcoin-shard-listener/metrics.Version=$(VERSION) -buildvcs=false"
+LDFLAGS   := -buildvcs=false -ldflags "-X github.com/lightwebinc/bitcoin-shard-listener/metrics.Version=$(VERSION)"
 BUILD_DIR := build
 
 PROXY_DIR := ../bitcoin-shard-proxy
