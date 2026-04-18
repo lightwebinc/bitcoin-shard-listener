@@ -161,6 +161,12 @@ to identify individual listener instances.
 gRPC endpoint for OTLP metric push (e.g. `otel-collector:4317`). Empty
 disables push export; Prometheus scraping always works regardless.
 
+### `-otlp-interval` / `OTLP_INTERVAL`
+
+Metric export interval for the OTLP push exporter. Default `30s`. Ignored when
+`OTLP_ENDPOINT` is empty. Tune down for tighter observability or up to reduce
+collector load.
+
 ---
 
 ## Example: minimal

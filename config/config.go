@@ -28,6 +28,7 @@
 //	-drain-timeout        DRAIN_TIMEOUT        0s               Pre-shutdown drain window
 //	-instance             INSTANCE_ID          hostname         OTel service.instance.id
 //	-otlp-endpoint        OTLP_ENDPOINT                         OTLP gRPC push (empty=disabled)
+//	-otlp-interval        OTLP_INTERVAL        30s              OTLP metric export interval
 package config
 
 import (
@@ -53,21 +54,21 @@ var Scopes = map[string]uint16{
 // Config holds all runtime parameters. Fields are read-only after [Load] returns.
 type Config struct {
 	// Network
-	Iface         *net.Interface // Interface for multicast joins and NACK send
-	ListenPort    int
-	EgressAddr    string
-	EgressProto   string // "udp" or "tcp"
-	StripHeader   bool
+	Iface          *net.Interface // Interface for multicast joins and NACK send
+	ListenPort     int
+	EgressAddr     string
+	EgressProto    string // "udp" or "tcp"
+	StripHeader    bool
 	RetryEndpoints []string // host:port list for NACK dispatch
 
 	// Sharding
-	ShardBits     uint
-	NumGroups     uint32
-	MCScope       string
-	MCPrefix      uint16
-	MCBaseAddr    string
-	MCMiddleBytes [11]byte
-	ShardInclude  []uint32    // empty = all
+	ShardBits      uint
+	NumGroups      uint32
+	MCScope        string
+	MCPrefix       uint16
+	MCBaseAddr     string
+	MCMiddleBytes  [11]byte
+	ShardInclude   []uint32   // empty = all
 	SubtreeInclude [][32]byte // empty = all allowed
 	SubtreeExclude [][32]byte // empty = none excluded
 
@@ -86,6 +87,7 @@ type Config struct {
 	MetricsAddr  string
 	InstanceID   string
 	OTLPEndpoint string
+	OTLPInterval time.Duration
 }
 
 // Load parses flags and environment variables, validates all values, and
@@ -135,6 +137,8 @@ func Load() (*Config, error) {
 		"OTel service.instance.id (default: hostname)")
 	flag.StringVar(&c.OTLPEndpoint, "otlp-endpoint", envStr("OTLP_ENDPOINT", ""),
 		"OTLP gRPC endpoint for metric push (empty = disabled)")
+	flag.DurationVar(&c.OTLPInterval, "otlp-interval", envDuration("OTLP_INTERVAL", 30*time.Second),
+		"OTLP metric export interval (ignored when OTLP_ENDPOINT is empty)")
 
 	bits := flag.Uint("shard-bits", uint(envInt("SHARD_BITS", 2)),
 		"txid prefix bit width used as the shard key (1–24); must match proxy")

@@ -55,7 +55,7 @@ func run() error {
 		"retry_endpoints", len(cfg.RetryEndpoints),
 	)
 
-	rec, err := metrics.New(cfg.InstanceID, cfg.NumWorkers, cfg.OTLPEndpoint, 30*time.Second)
+	rec, err := metrics.New(cfg.InstanceID, cfg.NumWorkers, cfg.OTLPEndpoint, cfg.OTLPInterval)
 	if err != nil {
 		return fmt.Errorf("metrics: %w", err)
 	}
