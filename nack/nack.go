@@ -39,7 +39,7 @@ type gapEntry struct {
 
 // senderState holds per-(senderID, groupIdx) tracking state.
 type senderState struct {
-	highestConsec uint64              // highest consecutive seq without gaps below
+	highestConsec uint64               // highest consecutive seq without gaps below
 	pending       map[uint64]*gapEntry // missing seqs awaiting NACK or fill
 }
 
@@ -110,13 +110,6 @@ func (t *Tracker) Observe(senderID [16]byte, groupIdx uint32, seq uint64, txid [
 	// Advance consecutive high-water mark.
 	if seq == st.highestConsec+1 {
 		st.highestConsec = seq
-		// Advance further if subsequent gaps were already filled.
-		for {
-			if _, gap := st.pending[st.highestConsec+1]; gap {
-				break
-			}
-			st.highestConsec++
-		}
 	} else if seq > st.highestConsec+1 {
 		// Gap: register all missing seqs between highestConsec+1 and seq-1.
 		now := time.Now()

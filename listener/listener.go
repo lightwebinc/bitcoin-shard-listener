@@ -26,7 +26,6 @@ import (
 	"net"
 	"syscall"
 
-	"golang.org/x/net/ipv6"
 	"golang.org/x/sys/unix"
 
 	"github.com/lightwebinc/bitcoin-shard-common/frame"
@@ -38,7 +37,12 @@ import (
 	"github.com/lightwebinc/bitcoin-shard-listener/nack"
 )
 
-const recvBufSize = frame.HeaderSize + frame.MaxPayload
+const (
+	recvBufSize = frame.HeaderSize + frame.MaxPayload
+
+	// socketRecvBuf is the UDP receive buffer requested on each worker socket.
+	socketRecvBuf = 64 * 1024 * 1024 // 64 MiB
+)
 
 // Worker is a single multicast receive goroutine.
 type Worker struct {
@@ -85,17 +89,22 @@ func New(
 
 // Run opens a SO_REUSEPORT socket, joins all multicast groups, and processes
 // frames until ctx is cancelled.
+//
+// The socket is created via raw syscalls so it is never registered with Go's
+// internal edge-triggered epoll. Blocking Recvfrom is used so the OS thread
+// parks in the kernel and wakes the moment a datagram arrives, with zero
+// scheduler overhead between the wakeup and the read.
 func (w *Worker) Run(ctx context.Context) error {
-	conn, err := openReusePortSocket(w.port)
+	fd, err := openRawSocket(w.port)
 	if err != nil {
 		return fmt.Errorf("worker %d: open socket: %w", w.id, err)
 	}
-	defer func() { _ = conn.Close() }()
-
-	pc := ipv6.NewPacketConn(conn)
 
 	for _, grp := range w.groups {
-		if err := pc.JoinGroup(w.iface, &net.UDPAddr{IP: grp.IP}); err != nil {
+		mreq := &unix.IPv6Mreq{Interface: uint32(w.iface.Index)}
+		copy(mreq.Multiaddr[:], grp.IP.To16())
+		if err := unix.SetsockoptIPv6Mreq(fd, unix.IPPROTO_IPV6, unix.IPV6_JOIN_GROUP, mreq); err != nil {
+			_ = unix.Close(fd)
 			return fmt.Errorf("worker %d: join group %s: %w", w.id, grp.IP, err)
 		}
 	}
@@ -107,22 +116,30 @@ func (w *Worker) Run(ctx context.Context) error {
 
 	w.log.Info("listener worker ready", "iface", w.iface.Name, "port", w.port, "groups", len(w.groups))
 
+	// Close the fd when the context is cancelled to unblock Recvfrom.
 	go func() {
 		<-ctx.Done()
-		_ = conn.Close()
+		_ = unix.Close(fd)
 	}()
 
 	buf := make([]byte, recvBufSize)
 	for {
-		n, _, err := conn.ReadFromUDP(buf)
+		// Blocking recvfrom: the OS thread sleeps in the kernel until a
+		// datagram arrives. No Go scheduler involvement between wakeup and read.
+		n, _, err := unix.Recvfrom(fd, buf, 0)
 		if err != nil {
-			if isClosedErr(err) {
-				return nil
+			if err == unix.EBADF || err == unix.EINVAL {
+				return nil // fd was closed by ctx cancellation
 			}
-			w.log.Debug("ReadFromUDP error", "err", err)
+			if err == unix.EINTR {
+				continue
+			}
+			w.log.Error("recvfrom error", "err", err)
 			continue
 		}
-		w.processFrame(buf[:n])
+		if n > 0 {
+			w.processFrame(buf[:n])
+		}
 	}
 }
 
@@ -159,7 +176,7 @@ func (w *Worker) processFrame(raw []byte) {
 		if w.rec != nil {
 			w.rec.EgressError(w.id)
 		}
-		w.log.Warn("egress send error", "err", err)
+		w.log.Debug("egress send error", "err", err)
 	} else {
 		if w.rec != nil {
 			w.rec.FrameForwarded(w.id, w.egr.Proto())
@@ -184,24 +201,26 @@ func (w *Worker) processFrame(raw []byte) {
 	}
 }
 
-// openReusePortSocket opens a UDP6 socket with SO_REUSEPORT bound to 0.0.0.0:port.
-func openReusePortSocket(port int) (*net.UDPConn, error) {
-	lc := net.ListenConfig{
-		Control: func(network, address string, c syscall.RawConn) error {
-			var setsockoptErr error
-			if err := c.Control(func(fd uintptr) {
-				setsockoptErr = unix.SetsockoptInt(int(fd), unix.SOL_SOCKET, unix.SO_REUSEPORT, 1)
-			}); err != nil {
-				return err
-			}
-			return setsockoptErr
-		},
-	}
-	pc, err := lc.ListenPacket(context.Background(), "udp6", fmt.Sprintf("[::]:%d", port))
+// openRawSocket creates a UDP6 socket with SO_REUSEPORT bound to [::]:port
+// using raw syscalls, bypassing Go's net package so the fd is never registered
+// with Go's internal edge-triggered epoll.
+func openRawSocket(port int) (int, error) {
+	fd, err := unix.Socket(unix.AF_INET6, unix.SOCK_DGRAM|unix.SOCK_CLOEXEC, 0)
 	if err != nil {
-		return nil, err
+		return -1, fmt.Errorf("socket: %w", err)
 	}
-	return pc.(*net.UDPConn), nil
+	if err := unix.SetsockoptInt(fd, unix.SOL_SOCKET, unix.SO_REUSEPORT, 1); err != nil {
+		_ = unix.Close(fd)
+		return -1, fmt.Errorf("SO_REUSEPORT: %w", err)
+	}
+	// Receive buffer: ignore error — kernel silently caps at rmem_max.
+	_ = unix.SetsockoptInt(fd, unix.SOL_SOCKET, unix.SO_RCVBUF, socketRecvBuf)
+	sa := &unix.SockaddrInet6{Port: port}
+	if err := unix.Bind(fd, sa); err != nil {
+		_ = unix.Close(fd)
+		return -1, fmt.Errorf("bind [::]::%d: %w", port, err)
+	}
+	return fd, nil
 }
 
 func isClosedErr(err error) bool {
