@@ -48,23 +48,25 @@ func New(shardInclude []uint32, subtreeInclude, subtreeExclude [][32]byte) *Filt
 	return f
 }
 
-// Allow returns true if the frame should be forwarded to egress.
+// Allow returns whether the frame should be forwarded to egress.
+// If the frame is denied, reason is one of "shard_filter",
+// "subtree_exclude", or "subtree_include_miss".
 // groupIdx is derived from the frame's TxID by the caller.
-func (f *Filter) Allow(groupIdx uint32, fr *frame.Frame) bool {
+func (f *Filter) Allow(groupIdx uint32, fr *frame.Frame) (bool, string) {
 	if f.shardInclude != nil {
 		if _, ok := f.shardInclude[groupIdx]; !ok {
-			return false
+			return false, "shard_filter"
 		}
 	}
 	if f.subtreeExclude != nil {
 		if _, ok := f.subtreeExclude[fr.SubtreeID]; ok {
-			return false
+			return false, "subtree_exclude"
 		}
 	}
 	if f.subtreeInclude != nil {
 		if _, ok := f.subtreeInclude[fr.SubtreeID]; !ok {
-			return false
+			return false, "subtree_include_miss"
 		}
 	}
-	return true
+	return true, ""
 }

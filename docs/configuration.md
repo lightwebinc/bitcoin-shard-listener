@@ -126,9 +126,18 @@ stale state across block boundaries.
 
 ### `-workers` / `NUM_WORKERS` (default: `runtime.NumCPU()`)
 
-Number of SO_REUSEPORT receive worker goroutines. The kernel distributes
-datagrams across all workers; the same source consistently lands on the same
-worker for CPU-local per-sender gap state.
+Number of SO_REUSEPORT receive worker goroutines.
+
+> **Critical — multicast receive:** Linux does **not** load-balance multicast
+> datagrams across SO_REUSEPORT sockets. Every socket that has joined a
+> multicast group receives a copy of each datagram, so `num_workers > 1`
+> causes every frame to be processed and forwarded that many times, inflating
+> all metrics and producing duplicate egress datagrams.
+> **Always set `NUM_WORKERS=1` when receiving multicast.**
+>
+> SO_REUSEPORT load balancing applies to unicast UDP only (e.g. the E2E test
+> path or a future unicast ingress mode). For the normal multicast-receive
+> deployment path, a single worker is correct.
 
 ### `-debug` / `DEBUG` (default: `false`)
 

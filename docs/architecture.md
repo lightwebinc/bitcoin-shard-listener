@@ -37,9 +37,15 @@ Each worker:
 4. Calls `nack.Tracker.Observe` for V2 frames with non-zero `SenderID` and
    `ShardSeqNum`.
 
-The kernel distributes datagrams across SO_REUSEPORT workers; the same source
-consistently lands on the same worker, giving CPU-local per-sender gap state
-with no cross-worker lock contention.
+**SO_REUSEPORT and multicast:** Linux does **not** load-balance multicast
+datagrams across SO_REUSEPORT sockets — every socket that has joined the group
+receives a full copy of each datagram. Running more than one worker therefore
+causes every frame to be processed and forwarded multiple times.
+**`NUM_WORKERS` must be set to `1` for multicast-receive deployments.**
+
+SO_REUSEPORT load balancing applies to unicast UDP only. The E2E test suite
+exploits this property by injecting frames as unicast to `[::]:listen-port`,
+allowing multiple worker sockets to be tested in isolation.
 
 ## V2 frame format (100 bytes)
 

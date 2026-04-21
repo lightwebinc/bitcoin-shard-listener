@@ -165,9 +165,9 @@ func (w *Worker) processFrame(raw []byte) {
 
 	groupIdx := w.engine.GroupIndex(&f.TxID)
 
-	if !w.filt.Allow(groupIdx, f) {
+	if allow, reason := w.filt.Allow(groupIdx, f); !allow {
 		if w.rec != nil {
-			w.rec.FrameDropped(w.id, "filtered")
+			w.rec.FrameDropped(w.id, reason)
 		}
 		return
 	}
