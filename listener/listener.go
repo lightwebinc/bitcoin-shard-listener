@@ -24,7 +24,7 @@ import (
 	"fmt"
 	"log/slog"
 	"net"
-	"syscall"
+	"time"
 
 	"golang.org/x/sys/unix"
 
@@ -116,7 +116,14 @@ func (w *Worker) Run(ctx context.Context) error {
 
 	w.log.Info("listener worker ready", "iface", w.iface.Name, "port", w.port, "groups", len(w.groups))
 
-	// Close the fd when the context is cancelled to unblock Recvfrom.
+	// SO_RCVTIMEO makes Recvfrom wake up periodically so we can check ctx.
+	// This is the reliable shutdown mechanism: closing the fd from another
+	// goroutine is POSIX-undefined and does not always unblock recvfrom on
+	// all Linux kernel versions. Keep the fd-close goroutine as a fast path
+	// for kernels that do support it.
+	tv := unix.NsecToTimeval((200 * time.Millisecond).Nanoseconds())
+	_ = unix.SetsockoptTimeval(fd, unix.SOL_SOCKET, unix.SO_RCVTIMEO, &tv)
+
 	go func() {
 		<-ctx.Done()
 		_ = unix.Close(fd)
@@ -124,15 +131,22 @@ func (w *Worker) Run(ctx context.Context) error {
 
 	buf := make([]byte, recvBufSize)
 	for {
-		// Blocking recvfrom: the OS thread sleeps in the kernel until a
-		// datagram arrives. No Go scheduler involvement between wakeup and read.
 		n, _, err := unix.Recvfrom(fd, buf, 0)
 		if err != nil {
+			if err == unix.EAGAIN || err == unix.EWOULDBLOCK {
+				if ctx.Err() != nil {
+					return nil
+				}
+				continue
+			}
 			if err == unix.EBADF || err == unix.EINVAL {
-				return nil // fd was closed by ctx cancellation
+				return nil
 			}
 			if err == unix.EINTR {
 				continue
+			}
+			if ctx.Err() != nil {
+				return nil
 			}
 			w.log.Error("recvfrom error", "err", err)
 			continue
@@ -221,40 +235,4 @@ func openRawSocket(port int) (int, error) {
 		return -1, fmt.Errorf("bind [::]::%d: %w", port, err)
 	}
 	return fd, nil
-}
-
-func isClosedErr(err error) bool {
-	if err == nil {
-		return false
-	}
-	return isErrno(err, syscall.EBADF) || isErrno(err, syscall.EINVAL) ||
-		containsString(err.Error(), "use of closed network connection")
-}
-
-func isErrno(err error, target syscall.Errno) bool {
-	for err != nil {
-		if e, ok := err.(syscall.Errno); ok {
-			return e == target
-		}
-		type unwrapper interface{ Unwrap() error }
-		if u, ok := err.(unwrapper); ok {
-			err = u.Unwrap()
-		} else {
-			break
-		}
-	}
-	return false
-}
-
-func containsString(s, sub string) bool {
-	return len(s) >= len(sub) && (s == sub || len(s) > 0 && searchString(s, sub))
-}
-
-func searchString(s, sub string) bool {
-	for i := 0; i <= len(s)-len(sub); i++ {
-		if s[i:i+len(sub)] == sub {
-			return true
-		}
-	}
-	return false
 }
