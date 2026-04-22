@@ -203,7 +203,7 @@ func (w *Worker) processFrame(raw []byte) {
 		f.Version == frame.FrameVerV2 &&
 		f.ShardSeqNum != 0 &&
 		f.SenderID != zero {
-		w.tracker.Observe(f.SenderID, groupIdx, f.ShardSeqNum, f.TxID)
+		w.tracker.Observe(f.SenderID, groupIdx, f.ShardSeqNum, f.SequenceID, f.TxID)
 	}
 
 	if w.debug {

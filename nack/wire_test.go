@@ -18,6 +18,7 @@ func TestEncodeDecodeNACK(t *testing.T) {
 		TxID:        txid,
 		ShardSeqNum: 0xDEADBEEF00000001,
 		SenderID:    senderID,
+		SequenceID:  0x1122334455667788,
 	}
 
 	var buf [nack.NACKSize]byte
@@ -38,6 +39,9 @@ func TestEncodeDecodeNACK(t *testing.T) {
 	}
 	if got.SenderID != senderID {
 		t.Errorf("SenderID mismatch: got %x, want %x", got.SenderID, senderID)
+	}
+	if got.SequenceID != n.SequenceID {
+		t.Errorf("SequenceID = %d, want %d", got.SequenceID, n.SequenceID)
 	}
 }
 
@@ -91,8 +95,9 @@ func TestIPv4MappedSenderID(t *testing.T) {
 	senderID[15] = 1
 
 	n := &nack.NACK{
-		MsgType:  nack.MsgTypeNACK,
-		SenderID: senderID,
+		MsgType:    nack.MsgTypeNACK,
+		SenderID:   senderID,
+		SequenceID: 0x9988776655443322,
 	}
 	var buf [nack.NACKSize]byte
 	nack.Encode(n, buf[:])

@@ -19,10 +19,11 @@ type TrackerConfig struct {
 	GapTTL     time.Duration // Max lifetime of a gap entry (~Bitcoin block interval)
 }
 
-// senderGroupKey is the composite state key per (senderID, groupIdx).
+// senderGroupKey is the composite state key per (senderID, groupIdx, sequenceID).
 type senderGroupKey struct {
-	senderID [16]byte
-	groupIdx uint32
+	senderID   [16]byte
+	groupIdx   uint32
+	sequenceID uint64
 }
 
 // gapEntry holds retry state for a single missing sequence number.
@@ -31,6 +32,7 @@ type gapEntry struct {
 	seq         uint64
 	senderID    [16]byte
 	groupIdx    uint32
+	sequenceID  uint64
 	retries     int
 	nextAttempt time.Time
 	deadline    time.Time // absolute eviction deadline (= detectedAt + GapTTL)
@@ -75,7 +77,7 @@ func New(cfg TrackerConfig, retryEndpoints []string, iface *net.Interface, rec *
 
 // Observe is called by the listener worker when a V2 frame with non-zero
 // SenderID and non-zero SeqNum arrives. It detects gaps and schedules NACKs.
-func (t *Tracker) Observe(senderID [16]byte, groupIdx uint32, seq uint64, txid [32]byte) {
+func (t *Tracker) Observe(senderID [16]byte, groupIdx uint32, seq uint64, sequenceID uint64, txid [32]byte) {
 	if seq == 0 {
 		return
 	}
@@ -87,7 +89,7 @@ func (t *Tracker) Observe(senderID [16]byte, groupIdx uint32, seq uint64, txid [
 	t.mu.Lock()
 	defer t.mu.Unlock()
 
-	key := senderGroupKey{senderID: senderID, groupIdx: groupIdx}
+	key := senderGroupKey{senderID: senderID, groupIdx: groupIdx, sequenceID: sequenceID}
 	st, ok := t.states[key]
 	if !ok {
 		st = &senderState{
@@ -123,6 +125,7 @@ func (t *Tracker) Observe(senderID [16]byte, groupIdx uint32, seq uint64, txid [
 				seq:         missing,
 				senderID:    senderID,
 				groupIdx:    groupIdx,
+				sequenceID:  sequenceID,
 				nextAttempt: now.Add(jitter),
 				deadline:    now.Add(t.cfg.GapTTL),
 			}
@@ -136,13 +139,13 @@ func (t *Tracker) Observe(senderID [16]byte, groupIdx uint32, seq uint64, txid [
 }
 
 // Fill is called when a previously-missing frame arrives on the multicast group
-// (repair received). It cancels any pending NACK for that (senderID, groupIdx, seq).
-func (t *Tracker) Fill(senderID [16]byte, groupIdx uint32, seq uint64) {
+// (repair received). It cancels any pending NACK for that (senderID, groupIdx, sequenceID, seq).
+func (t *Tracker) Fill(senderID [16]byte, groupIdx uint32, sequenceID uint64, seq uint64) {
 	if seq == 0 {
 		return
 	}
 	t.mu.Lock()
-	key := senderGroupKey{senderID: senderID, groupIdx: groupIdx}
+	key := senderGroupKey{senderID: senderID, groupIdx: groupIdx, sequenceID: sequenceID}
 	st, ok := t.states[key]
 	if ok {
 		if _, found := st.pending[seq]; found {
@@ -248,6 +251,7 @@ func (t *Tracker) sendNACK(e *gapEntry) {
 		TxID:        e.txid,
 		ShardSeqNum: e.seq,
 		SenderID:    e.senderID,
+		SequenceID:  e.sequenceID,
 	}
 	Encode(n, buf[:])
 
@@ -272,7 +276,7 @@ func (t *Tracker) sendNACK(e *gapEntry) {
 
 	// Update retry state under lock.
 	t.mu.Lock()
-	key := senderGroupKey{senderID: e.senderID, groupIdx: e.groupIdx}
+	key := senderGroupKey{senderID: e.senderID, groupIdx: e.groupIdx, sequenceID: e.sequenceID}
 	if st, ok := t.states[key]; ok {
 		if entry, ok := st.pending[e.seq]; ok {
 			entry.retries++

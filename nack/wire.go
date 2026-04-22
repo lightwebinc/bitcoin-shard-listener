@@ -1,7 +1,7 @@
 // Package nack implements NORM-inspired multicast gap recovery for
-// bitcoin-shard-listener. This file defines the 64-byte NACK wire format.
+// bitcoin-shard-listener. This file defines the 72-byte NACK wire format.
 //
-// # NACK datagram (UDP, 64 bytes, 8-byte aligned)
+// # NACK datagram (UDP, 72 bytes, 8-byte aligned)
 //
 //	Offset  Size  Field
 //	------  ----  -----
@@ -12,6 +12,7 @@
 //	     8    32  TxID               — identifies the missing frame
 //	    40     8  ShardSeqNum        — sender's sequence number; 0 = unknown
 //	    48    16  SenderID           — original BSV sender IPv6; zeros = unknown
+//	    64     8  SequenceID         — flow identifier; zeros = unknown
 //
 // The MISS datagram is the optional 8-byte "not found" response from a retry
 // endpoint (MsgType=0x11). Only the first 8 bytes are meaningful.
@@ -24,7 +25,7 @@ import (
 
 const (
 	// NACKSize is the fixed size of a NACK datagram in bytes.
-	NACKSize = 64
+	NACKSize = 72
 
 	// MsgTypeNACK identifies a gap-retransmission request.
 	MsgTypeNACK byte = 0x10
@@ -32,7 +33,7 @@ const (
 	// MsgTypeMISS identifies a "frame not in cache" response from a retry endpoint.
 	MsgTypeMISS byte = 0x11
 
-	nackMagic   uint32 = 0xE3E1F3E8
+	nackMagic    uint32 = 0xE3E1F3E8
 	nackProtoVer uint16 = 0x02BF
 )
 
@@ -45,6 +46,7 @@ type NACK struct {
 	TxID        [32]byte
 	ShardSeqNum uint64
 	SenderID    [16]byte
+	SequenceID  uint64
 }
 
 // Encode serialises n into buf (must be at least [NACKSize] bytes).
@@ -57,6 +59,7 @@ func Encode(n *NACK, buf []byte) {
 	copy(buf[8:40], n.TxID[:])
 	binary.BigEndian.PutUint64(buf[40:48], n.ShardSeqNum)
 	copy(buf[48:64], n.SenderID[:])
+	binary.BigEndian.PutUint64(buf[64:72], n.SequenceID)
 }
 
 // Decode parses a NACK or MISS datagram from buf.
@@ -77,6 +80,7 @@ func Decode(buf []byte) (*NACK, error) {
 	copy(n.TxID[:], buf[8:40])
 	n.ShardSeqNum = binary.BigEndian.Uint64(buf[40:48])
 	copy(n.SenderID[:], buf[48:64])
+	n.SequenceID = binary.BigEndian.Uint64(buf[64:72])
 	return n, nil
 }
 

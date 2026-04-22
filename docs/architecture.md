@@ -57,7 +57,7 @@ Offset  Size  Field
      6     1  Frame version    0x02
      7     1  Reserved         0x00
      8    32  Transaction ID   raw 256-bit txid (internal byte order)
-    40     8  Shard seq num    uint64 BE; sender-assigned; 0 = unset
+    40     8  Sequence number uint64 BE; sender-assigned; 0 = unset
     48    32  Subtree ID       32-byte batch identifier; zeros = unset
     80    16  Sender ID        original BSV sender IPv6 (net.IP.To16()); zeros = unset
     96     4  Payload length   uint32 BE; max 10 MiB
