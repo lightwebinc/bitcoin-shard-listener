@@ -26,8 +26,8 @@ jobs:
 
       - uses: actions/checkout@v6
         with:
-          repository: lightwebinc/bitcoin-shard-proxy
-          path: bitcoin-shard-proxy
+          repository: lightwebinc/bitcoin-shard-common
+          path: bitcoin-shard-common
 
       - uses: actions/setup-go@v6
         with:

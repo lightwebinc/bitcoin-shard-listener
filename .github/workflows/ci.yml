@@ -99,6 +99,11 @@ jobs:
           repository: lightwebinc/bitcoin-shard-common
           path: bitcoin-shard-common
 
+      - uses: actions/checkout@v6
+        with:
+          repository: lightwebinc/bitcoin-shard-proxy
+          path: bitcoin-shard-proxy
+
       - uses: actions/setup-go@v6
         with:
           go-version-file: bitcoin-shard-listener/go.mod
