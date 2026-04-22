@@ -44,10 +44,10 @@ type Recorder struct {
 	shutdownFn func(context.Context) error
 
 	// Ingress counters
-	framesReceived metric.Int64Counter // by worker, iface, version
-	framesDropped  metric.Int64Counter // by reason
+	framesReceived  metric.Int64Counter // by worker, iface, version
+	framesDropped   metric.Int64Counter // by reason
 	framesForwarded metric.Int64Counter // by worker, proto
-	egressErrors   metric.Int64Counter
+	egressErrors    metric.Int64Counter
 
 	// NACK / gap counters
 	gapsDetected     metric.Int64Counter

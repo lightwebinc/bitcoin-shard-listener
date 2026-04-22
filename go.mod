@@ -14,6 +14,8 @@ require (
 	golang.org/x/sys v0.42.0
 )
 
+replace github.com/lightwebinc/bitcoin-shard-common => ../bitcoin-shard-common
+
 require (
 	github.com/beorn7/perks v1.0.1 // indirect
 	github.com/cenkalti/backoff/v5 v5.0.3 // indirect
