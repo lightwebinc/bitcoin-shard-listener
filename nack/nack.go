@@ -75,7 +75,7 @@ func New(cfg TrackerConfig, retryEndpoints []string, iface *net.Interface, rec *
 	}
 }
 
-// Observe is called by the listener worker when a BRC-123 frame with non-zero
+// Observe is called by the listener worker when a BRC-122 frame with non-zero
 // SenderID and non-zero SeqNum arrives. It detects gaps and schedules NACKs.
 func (t *Tracker) Observe(senderID uint32, groupIdx uint32, seq uint32, sequenceID uint32, txid [32]byte) {
 	if seq == 0 {

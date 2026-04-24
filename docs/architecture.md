@@ -3,7 +3,7 @@
 ## Overview
 
 `bitcoin-shard-listener` sits downstream of `bitcoin-shard-proxy` in the BSV
-transaction distribution pipeline. The proxy multicasts BRC-123 frames onto an
+transaction distribution pipeline. The proxy multicasts BRC-122 frames onto an
 IPv6 multicast fabric; the listener joins the relevant groups, filters frames
 by shard index and/or subtree ID, forwards matching frames to a configurable
 unicast downstream over UDP or TCP, and performs NORM-inspired NACK-based gap
@@ -14,7 +14,7 @@ BSV senders
    │ (TCP or UDP ingress)
    ▼
 bitcoin-shard-proxy
-   │ BRC-123 frames, SenderID stamped in-place at bytes 40–43 (CRC32c)
+   │ BRC-122 frames, SenderID stamped in-place at bytes 40–43 (CRC32c)
    │ IPv6 multicast  FF05::<group-index>
    ▼
 Multicast fabric (site-scoped FF05::/16)
@@ -34,7 +34,7 @@ Each worker:
 2. Joins all configured multicast groups on the configured interface.
 3. Calls `frame.Decode`, `shard.Engine.GroupIndex`, `filter.Allow`, and
    `egress.Send` in the hot path for every received datagram.
-4. Calls `nack.Tracker.Observe` for BRC-123 frames with non-zero `SenderID` and
+4. Calls `nack.Tracker.Observe` for BRC-122 frames with non-zero `SenderID` and
    `ShardSeqNum`.
 
 **SO_REUSEPORT and multicast:** Linux does **not** load-balance multicast
@@ -47,14 +47,14 @@ SO_REUSEPORT load balancing applies to unicast UDP only. The E2E test suite
 exploits this property by injecting frames as unicast to `[::]:listen-port`,
 allowing multiple worker sockets to be tested in isolation.
 
-## BRC-123 frame format (92 bytes)
+## BRC-122 frame format (92 bytes)
 
 ```text
 Offset  Size  Field
 ------  ----  -----
      0     4  Network magic         0xE3E1F3E8
      4     2  Protocol ver          0x02BF
-     6     1  Frame version         0x02 (BRC-123)
+     6     1  Frame version         0x02 (BRC-122)
      7     1  Reserved              0x00
      8    32  Transaction ID        raw 256-bit txid (internal byte order)
     40     4  Sender ID             CRC32c of IPv6; 0 = unset
@@ -108,7 +108,7 @@ Filtering is pure (no I/O) and allocation-free on the hot path:
 
 ## V1 frame support
 
-`frame.Decode` accepts both v1 (44-byte header) and BRC-123 (92-byte header) frames.
+`frame.Decode` accepts both v1 (44-byte header) and BRC-122 (92-byte header) frames.
 v1 frames are decoded with zero-valued `ShardSeqNum`, `SubtreeID`,
 `SenderID`, and `SequenceID`. Shard filtering applies to v1 frames normally;
 subtree filtering has no effect (zero `SubtreeID` passes all include/exclude checks).
@@ -124,7 +124,7 @@ A single `egress.Sender` per worker delivers frames to `egress-addr`:
 | `tcp` | lazy connect on first frame; reconnect on write error |
 
 `strip-header=true` sends only the raw BSV transaction bytes (frame payload);
-`strip-header=false` (default) sends the complete 92-byte BRC-123 frame verbatim.
+`strip-header=false` (default) sends the complete 92-byte BRC-122 frame verbatim.
 
 ## Testing
 

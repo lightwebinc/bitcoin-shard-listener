@@ -3,7 +3,7 @@
 // have been received it exits 0. If -timeout expires first it exits 1.
 //
 // Use -raw to count raw UDP datagrams without frame decoding; pass this flag
-// when testing strip-header mode where the listener strips the 92-byte BRC-123
+// when testing strip-header mode where the listener strips the 92-byte BRC-122
 // frame header before forwarding.
 //
 // Usage:

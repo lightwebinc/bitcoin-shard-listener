@@ -1,5 +1,5 @@
 // Package nack implements NORM-inspired multicast gap recovery for
-// bitcoin-shard-listener. This file defines the 56-byte NACK wire format (BRC-123).
+// bitcoin-shard-listener. This file defines the 56-byte NACK wire format (BRC-122).
 //
 // # NACK datagram (UDP, 56 bytes, 8-byte aligned)
 //
