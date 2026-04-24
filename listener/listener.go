@@ -171,8 +171,8 @@ func (w *Worker) processFrame(raw []byte) {
 
 	if w.rec != nil {
 		ver := "v1"
-		if f.Version == frame.FrameVerV2 {
-			ver = "v2"
+		if f.Version == frame.FrameVerBRC123 {
+			ver = "brc123"
 		}
 		w.rec.FrameReceived(w.id, w.iface.Name, ver)
 	}
@@ -197,12 +197,11 @@ func (w *Worker) processFrame(raw []byte) {
 		}
 	}
 
-	// Gap tracking: V2 only, both SenderID and SeqNum must be non-zero.
-	var zero [16]byte
+	// Gap tracking: BRC-123 only, both SenderID and SeqNum must be non-zero.
 	if w.tracker != nil &&
-		f.Version == frame.FrameVerV2 &&
+		f.Version == frame.FrameVerBRC123 &&
 		f.ShardSeqNum != 0 &&
-		f.SenderID != zero {
+		f.SenderID != 0 {
 		w.tracker.Observe(f.SenderID, groupIdx, f.ShardSeqNum, f.SequenceID, f.TxID)
 	}
 

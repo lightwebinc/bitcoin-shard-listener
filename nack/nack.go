@@ -21,18 +21,18 @@ type TrackerConfig struct {
 
 // senderGroupKey is the composite state key per (senderID, groupIdx, sequenceID).
 type senderGroupKey struct {
-	senderID   [16]byte
+	senderID   uint32
 	groupIdx   uint32
-	sequenceID uint64
+	sequenceID uint32
 }
 
 // gapEntry holds retry state for a single missing sequence number.
 type gapEntry struct {
 	txid        [32]byte
-	seq         uint64
-	senderID    [16]byte
+	seq         uint32
+	senderID    uint32
 	groupIdx    uint32
-	sequenceID  uint64
+	sequenceID  uint32
 	retries     int
 	nextAttempt time.Time
 	deadline    time.Time // absolute eviction deadline (= detectedAt + GapTTL)
@@ -41,8 +41,8 @@ type gapEntry struct {
 
 // senderState holds per-(senderID, groupIdx) tracking state.
 type senderState struct {
-	highestConsec uint64               // highest consecutive seq without gaps below
-	pending       map[uint64]*gapEntry // missing seqs awaiting NACK or fill
+	highestConsec uint32               // highest consecutive seq without gaps below
+	pending       map[uint32]*gapEntry // missing seqs awaiting NACK or fill
 }
 
 // Tracker is the gap state machine. Construct with [New] and call [Start] to
@@ -75,14 +75,13 @@ func New(cfg TrackerConfig, retryEndpoints []string, iface *net.Interface, rec *
 	}
 }
 
-// Observe is called by the listener worker when a V2 frame with non-zero
+// Observe is called by the listener worker when a BRC-123 frame with non-zero
 // SenderID and non-zero SeqNum arrives. It detects gaps and schedules NACKs.
-func (t *Tracker) Observe(senderID [16]byte, groupIdx uint32, seq uint64, sequenceID uint64, txid [32]byte) {
+func (t *Tracker) Observe(senderID uint32, groupIdx uint32, seq uint32, sequenceID uint32, txid [32]byte) {
 	if seq == 0 {
 		return
 	}
-	var zero [16]byte
-	if senderID == zero {
+	if senderID == 0 {
 		return
 	}
 
@@ -94,7 +93,7 @@ func (t *Tracker) Observe(senderID [16]byte, groupIdx uint32, seq uint64, sequen
 	if !ok {
 		st = &senderState{
 			highestConsec: seq,
-			pending:       make(map[uint64]*gapEntry),
+			pending:       make(map[uint32]*gapEntry),
 		}
 		t.states[key] = st
 		return
@@ -140,7 +139,7 @@ func (t *Tracker) Observe(senderID [16]byte, groupIdx uint32, seq uint64, sequen
 
 // Fill is called when a previously-missing frame arrives on the multicast group
 // (repair received). It cancels any pending NACK for that (senderID, groupIdx, sequenceID, seq).
-func (t *Tracker) Fill(senderID [16]byte, groupIdx uint32, sequenceID uint64, seq uint64) {
+func (t *Tracker) Fill(senderID uint32, groupIdx uint32, sequenceID uint32, seq uint32) {
 	if seq == 0 {
 		return
 	}
@@ -192,7 +191,7 @@ func (t *Tracker) sweepOnce(now time.Time) {
 					t.rec.GapUnrecovered()
 				}
 				t.log.Debug("gap evicted (TTL)",
-					"sender", net.IP(e.senderID[:]).String(),
+					"sender", e.senderID,
 					"group", key.groupIdx,
 					"seq", seq,
 				)
@@ -204,7 +203,7 @@ func (t *Tracker) sweepOnce(now time.Time) {
 					t.rec.GapUnrecovered()
 				}
 				t.log.Debug("gap evicted (retries)",
-					"sender", net.IP(e.senderID[:]).String(),
+					"sender", e.senderID,
 					"group", key.groupIdx,
 					"seq", seq,
 				)

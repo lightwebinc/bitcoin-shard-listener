@@ -1,7 +1,7 @@
 # bitcoin-shard-listener
 
 Multicast subscriber and unicast forwarder for the BSV transaction sharding
-pipeline. Receives V2 frames from the `bitcoin-shard-proxy` multicast fabric,
+pipeline. Receives BRC-123 frames from the `bitcoin-shard-proxy` multicast fabric,
 applies shard and subtree filters, forwards matching frames to a configurable
 downstream unicast consumer over UDP or TCP, and performs NORM-inspired
 NACK-based gap recovery keyed on `(SenderID, groupIndex)`.
@@ -10,10 +10,10 @@ NACK-based gap recovery keyed on `(SenderID, groupIndex)`.
 
 - **SO_REUSEPORT** multi-worker receive with kernel-level source affinity
 - **Shard filter** — subscribe to a subset of shard groups (empty = all)
-- **Subtree filter** — include/exclude by 32-byte SubtreeID (V2 frames)
+- **Subtree filter** — include/exclude by 32-byte SubtreeID (BRC-123 frames)
 - **Gap tracking** — per `(SenderID, groupIndex)` sequence gap detection
-- **IPv4-mapped SenderID support** — `::ffff:a.b.c.d` senders fully tracked
-- **NACK dispatch** — 64-byte NACK datagrams to configurable retry endpoints
+- **SenderID support** — CRC32c of sender IPv6; collision-resistant at BSV network scale
+- **NACK dispatch** — 56-byte NACK datagrams to configurable retry endpoints
 - **Egress UDP or TCP** with optional strip-header mode (payload-only)
 - **Prometheus + OTLP metrics**, `/healthz`, `/readyz`
 - **Graceful shutdown** with configurable drain window

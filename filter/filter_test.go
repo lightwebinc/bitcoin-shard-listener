@@ -9,7 +9,7 @@ import (
 
 func makeFrame(subtree [32]byte) *frame.Frame {
 	return &frame.Frame{
-		Version:   frame.FrameVerV2,
+		Version:   frame.FrameVerBRC123,
 		SubtreeID: subtree,
 	}
 }

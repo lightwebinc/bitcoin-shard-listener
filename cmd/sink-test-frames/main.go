@@ -3,8 +3,8 @@
 // have been received it exits 0. If -timeout expires first it exits 1.
 //
 // Use -raw to count raw UDP datagrams without frame decoding; pass this flag
-// when testing strip-header mode where the listener strips the 100-byte frame
-// header before forwarding.
+// when testing strip-header mode where the listener strips the 92-byte BRC-123
+// frame header before forwarding.
 //
 // Usage:
 //
@@ -25,9 +25,9 @@ import (
 )
 
 func main() {
-	port    := flag.Int("port", 9102, "UDP port to listen on")
-	count   := flag.Int("count", 0, "exit 0 after receiving this many items (0 = run forever)")
-	raw     := flag.Bool("raw", false, "count raw datagrams without frame decode (for strip-header testing)")
+	port := flag.Int("port", 9102, "UDP port to listen on")
+	count := flag.Int("count", 0, "exit 0 after receiving this many items (0 = run forever)")
+	raw := flag.Bool("raw", false, "count raw datagrams without frame decode (for strip-header testing)")
 	timeout := flag.Duration("timeout", 30*time.Second, "exit 1 if -count not reached within this duration (0 = no timeout)")
 	flag.Parse()
 

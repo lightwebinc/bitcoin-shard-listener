@@ -10,15 +10,12 @@ func TestEncodeDecodeNACK(t *testing.T) {
 	var txid [32]byte
 	txid[0] = 0xAB
 
-	var senderID [16]byte
-	senderID[15] = 0x01
-
 	n := &nack.NACK{
 		MsgType:     nack.MsgTypeNACK,
 		TxID:        txid,
-		ShardSeqNum: 0xDEADBEEF00000001,
-		SenderID:    senderID,
-		SequenceID:  0x1122334455667788,
+		SenderID:    0xAABBCCDD,
+		SequenceID:  0x11223344,
+		ShardSeqNum: 0xDEADBEEF,
 	}
 
 	var buf [nack.NACKSize]byte
@@ -34,14 +31,14 @@ func TestEncodeDecodeNACK(t *testing.T) {
 	if got.TxID != txid {
 		t.Errorf("TxID mismatch")
 	}
-	if got.ShardSeqNum != n.ShardSeqNum {
-		t.Errorf("ShardSeqNum = %d, want %d", got.ShardSeqNum, n.ShardSeqNum)
-	}
-	if got.SenderID != senderID {
-		t.Errorf("SenderID mismatch: got %x, want %x", got.SenderID, senderID)
+	if got.SenderID != n.SenderID {
+		t.Errorf("SenderID = %d, want %d", got.SenderID, n.SenderID)
 	}
 	if got.SequenceID != n.SequenceID {
 		t.Errorf("SequenceID = %d, want %d", got.SequenceID, n.SequenceID)
+	}
+	if got.ShardSeqNum != n.ShardSeqNum {
+		t.Errorf("ShardSeqNum = %d, want %d", got.ShardSeqNum, n.ShardSeqNum)
 	}
 }
 
@@ -84,20 +81,14 @@ func TestDecodeErrBadType(t *testing.T) {
 	}
 }
 
-func TestIPv4MappedSenderID(t *testing.T) {
-	var senderID [16]byte
-	// ::ffff:192.0.2.1
-	senderID[10] = 0xFF
-	senderID[11] = 0xFF
-	senderID[12] = 192
-	senderID[13] = 0
-	senderID[14] = 2
-	senderID[15] = 1
+func TestCRC32cSenderID(t *testing.T) {
+	// SenderID is now a CRC32c checksum of the IPv6 address (uint32)
+	var senderID uint32 = 0xDEADBEEF
 
 	n := &nack.NACK{
 		MsgType:    nack.MsgTypeNACK,
 		SenderID:   senderID,
-		SequenceID: 0x9988776655443322,
+		SequenceID: 0x99887766,
 	}
 	var buf [nack.NACKSize]byte
 	nack.Encode(n, buf[:])
@@ -106,6 +97,6 @@ func TestIPv4MappedSenderID(t *testing.T) {
 		t.Fatalf("Decode: %v", err)
 	}
 	if got.SenderID != senderID {
-		t.Errorf("IPv4-mapped SenderID not preserved: got %x, want %x", got.SenderID, senderID)
+		t.Errorf("SenderID not preserved: got %x, want %x", got.SenderID, senderID)
 	}
 }

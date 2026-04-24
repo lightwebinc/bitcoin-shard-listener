@@ -1,7 +1,7 @@
 // Package nack implements NORM-inspired multicast gap recovery for
-// bitcoin-shard-listener. This file defines the 72-byte NACK wire format.
+// bitcoin-shard-listener. This file defines the 56-byte NACK wire format (BRC-123).
 //
-// # NACK datagram (UDP, 72 bytes, 8-byte aligned)
+// # NACK datagram (UDP, 56 bytes, 8-byte aligned)
 //
 //	Offset  Size  Field
 //	------  ----  -----
@@ -10,9 +10,10 @@
 //	     6     1  MsgType = 0x10 (NACK) or 0x11 (MISS)
 //	     7     1  Reserved = 0x00
 //	     8    32  TxID               — identifies the missing frame
-//	    40     8  ShardSeqNum        — sender's sequence number; 0 = unknown
-//	    48    16  SenderID           — original BSV sender IPv6; zeros = unknown
-//	    64     8  SequenceID         — flow identifier; zeros = unknown
+//	    40     4  SenderID           — CRC32c of IPv6; 0 = unknown
+//	    44     4  SequenceID         — flow identifier; 0 = unknown
+//	    48     4  ShardSeqNum        — sender's sequence number; 0 = unknown
+//	    52     4  Reserved           — padding; must be 0x00000000
 //
 // The MISS datagram is the optional 8-byte "not found" response from a retry
 // endpoint (MsgType=0x11). Only the first 8 bytes are meaningful.
@@ -25,7 +26,7 @@ import (
 
 const (
 	// NACKSize is the fixed size of a NACK datagram in bytes.
-	NACKSize = 72
+	NACKSize = 56
 
 	// MsgTypeNACK identifies a gap-retransmission request.
 	MsgTypeNACK byte = 0x10
@@ -44,9 +45,9 @@ var ErrBadNACK = errors.New("nack: invalid datagram")
 type NACK struct {
 	MsgType     byte
 	TxID        [32]byte
-	ShardSeqNum uint64
-	SenderID    [16]byte
-	SequenceID  uint64
+	SenderID    uint32
+	SequenceID  uint32
+	ShardSeqNum uint32
 }
 
 // Encode serialises n into buf (must be at least [NACKSize] bytes).
@@ -57,9 +58,10 @@ func Encode(n *NACK, buf []byte) {
 	buf[6] = n.MsgType
 	buf[7] = 0
 	copy(buf[8:40], n.TxID[:])
-	binary.BigEndian.PutUint64(buf[40:48], n.ShardSeqNum)
-	copy(buf[48:64], n.SenderID[:])
-	binary.BigEndian.PutUint64(buf[64:72], n.SequenceID)
+	binary.BigEndian.PutUint32(buf[40:44], n.SenderID)
+	binary.BigEndian.PutUint32(buf[44:48], n.SequenceID)
+	binary.BigEndian.PutUint32(buf[48:52], n.ShardSeqNum)
+	binary.BigEndian.PutUint32(buf[52:56], 0) // reserved padding
 }
 
 // Decode parses a NACK or MISS datagram from buf.
@@ -78,9 +80,9 @@ func Decode(buf []byte) (*NACK, error) {
 	}
 	n := &NACK{MsgType: mt}
 	copy(n.TxID[:], buf[8:40])
-	n.ShardSeqNum = binary.BigEndian.Uint64(buf[40:48])
-	copy(n.SenderID[:], buf[48:64])
-	n.SequenceID = binary.BigEndian.Uint64(buf[64:72])
+	n.SenderID = binary.BigEndian.Uint32(buf[40:44])
+	n.SequenceID = binary.BigEndian.Uint32(buf[44:48])
+	n.ShardSeqNum = binary.BigEndian.Uint32(buf[48:52])
 	return n, nil
 }
 

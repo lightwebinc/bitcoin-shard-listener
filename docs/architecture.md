@@ -3,9 +3,9 @@
 ## Overview
 
 `bitcoin-shard-listener` sits downstream of `bitcoin-shard-proxy` in the BSV
-transaction distribution pipeline. The proxy multicasts V2 frames onto an IPv6
-multicast fabric; the listener joins the relevant groups, filters frames by
-shard index and/or subtree ID, forwards matching frames to a configurable
+transaction distribution pipeline. The proxy multicasts BRC-123 frames onto an
+IPv6 multicast fabric; the listener joins the relevant groups, filters frames
+by shard index and/or subtree ID, forwards matching frames to a configurable
 unicast downstream over UDP or TCP, and performs NORM-inspired NACK-based gap
 recovery.
 
@@ -14,7 +14,7 @@ BSV senders
    │ (TCP or UDP ingress)
    ▼
 bitcoin-shard-proxy
-   │ V2 frames, SenderID stamped in-place at bytes 80–95
+   │ BRC-123 frames, SenderID stamped in-place at bytes 40–43 (CRC32c)
    │ IPv6 multicast  FF05::<group-index>
    ▼
 Multicast fabric (site-scoped FF05::/16)
@@ -34,7 +34,7 @@ Each worker:
 2. Joins all configured multicast groups on the configured interface.
 3. Calls `frame.Decode`, `shard.Engine.GroupIndex`, `filter.Allow`, and
    `egress.Send` in the hot path for every received datagram.
-4. Calls `nack.Tracker.Observe` for V2 frames with non-zero `SenderID` and
+4. Calls `nack.Tracker.Observe` for BRC-123 frames with non-zero `SenderID` and
    `ShardSeqNum`.
 
 **SO_REUSEPORT and multicast:** Linux does **not** load-balance multicast
@@ -47,32 +47,33 @@ SO_REUSEPORT load balancing applies to unicast UDP only. The E2E test suite
 exploits this property by injecting frames as unicast to `[::]:listen-port`,
 allowing multiple worker sockets to be tested in isolation.
 
-## V2 frame format (100 bytes)
+## BRC-123 frame format (92 bytes)
 
-```
+```text
 Offset  Size  Field
 ------  ----  -----
-     0     4  Network magic    0xE3E1F3E8
-     4     2  Protocol ver     0x02BF
-     6     1  Frame version    0x02
-     7     1  Reserved         0x00
-     8    32  Transaction ID   raw 256-bit txid (internal byte order)
-    40     8  Sequence number uint64 BE; sender-assigned; 0 = unset
-    48    32  Subtree ID       32-byte batch identifier; zeros = unset
-    80    16  Sender ID        original BSV sender IPv6 (net.IP.To16()); zeros = unset
-    96     4  Payload length   uint32 BE; max 10 MiB
-   100     *  BSV tx payload
+     0     4  Network magic         0xE3E1F3E8
+     4     2  Protocol ver          0x02BF
+     6     1  Frame version         0x02 (BRC-123)
+     7     1  Reserved              0x00
+     8    32  Transaction ID        raw 256-bit txid (internal byte order)
+    40     4  Sender ID             CRC32c of IPv6; 0 = unset
+    44     4  Sequence ID           uint32 BE; random flow identifier; 0 = unset
+    48     4  Shard Sequence Number uint32 BE; monotonic counter; 0 = unset
+    52     4  Reserved              padding; must be 0x00000000
+    56    32  Subtree ID            32-byte batch identifier; zeros = unset
+    88     4  Payload length        uint32 BE; max 10 MiB
+    92     *  BSV tx payload
 ```
 
-`SenderID` is stamped in-place by the proxy from the TCP/UDP source address.
-IPv4 sources appear as `::ffff:a.b.c.d` (IPv4-mapped IPv6) — these are
-**valid SenderIDs** and participate in gap tracking exactly like native IPv6
-senders. Gap tracking is skipped only when `SenderID` is all-zeros (field
-unset, i.e. proxy not yet updated) or `ShardSeqNum` is zero.
+`SenderID` is stamped in-place by the proxy as the CRC32c (Castagnoli) of the
+TCP/UDP source IPv6 address. Collision risk is minimal on realistic BSV
+networks (~1,000 mining nodes, ~12-20 core transaction processors). Gap tracking
+is skipped when `SenderID` is zero (field unset) or `ShardSeqNum` is zero.
 
 ## Gap tracking (NACK / NORM-inspired)
 
-State key: `(SenderID, groupIdx)`. Per-key state:
+State key: `(SenderID, groupIdx, SequenceID)`. Per-key state:
 - `highestConsec`: highest sequence number without a gap below it.
 - `pending`: map of missing sequence numbers to their `gapEntry`.
 
@@ -89,7 +90,7 @@ A background sweeper fires every 100 ms:
   `bsl_gaps_unrecovered_total`.
 - Entries past `nextAttempt` with `retries < nack-max-retries` are dispatched
   to the `nackQueue`.
-- `nackQueue` consumers send 64-byte NACK datagrams to retry endpoints over
+- `nackQueue` consumers send 56-byte NACK datagrams to retry endpoints over
   unicast UDP. Retry intervals follow exponential backoff capped at
   `nack-backoff-max`.
 
@@ -107,11 +108,11 @@ Filtering is pure (no I/O) and allocation-free on the hot path:
 
 ## V1 frame support
 
-`frame.Decode` accepts both V1 (44-byte header) and V2 (100-byte header) frames.
-V1 frames are decoded with zero-valued `ShardSeqNum`, `SubtreeID`, and
-`SenderID`. Shard filtering applies to V1 frames normally; subtree filtering has
-no effect (zero `SubtreeID` passes all include/exclude checks). Gap tracking is
-skipped for V1 frames because `SenderID` is all-zeros.
+`frame.Decode` accepts both v1 (44-byte header) and BRC-123 (92-byte header) frames.
+v1 frames are decoded with zero-valued `ShardSeqNum`, `SubtreeID`,
+`SenderID`, and `SequenceID`. Shard filtering applies to v1 frames normally;
+subtree filtering has no effect (zero `SubtreeID` passes all include/exclude checks).
+Gap tracking is skipped for v1 frames because `SenderID` is zero.
 
 ## Egress
 
@@ -123,7 +124,7 @@ A single `egress.Sender` per worker delivers frames to `egress-addr`:
 | `tcp` | lazy connect on first frame; reconnect on write error |
 
 `strip-header=true` sends only the raw BSV transaction bytes (frame payload);
-`strip-header=false` (default) sends the complete 100-byte v2 frame verbatim.
+`strip-header=false` (default) sends the complete 92-byte BRC-123 frame verbatim.
 
 ## Testing
 

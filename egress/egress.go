@@ -18,7 +18,7 @@
 //
 // When [Config.StripHeader] is true, only the raw BSV transaction bytes
 // (frame.Payload) are forwarded. When false, the complete frame including
-// the 100-byte v2 header is forwarded verbatim.
+// the 92-byte BRC-123 header is forwarded verbatim.
 package egress
 
 import (
