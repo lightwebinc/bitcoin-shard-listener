@@ -11,7 +11,7 @@
 //
 // # Hot path per frame
 //
-//  1. ReadFrom (per-worker 10 MiB + header receive buffer)
+//  1. ReadFrom (per-worker receive buffer)
 //  2. frame.Decode — extract TxID, Version, ShardSeqNum, SenderID
 //  3. shard.Engine.GroupIndex — derive groupIdx from TxID
 //  4. filter.Filter.Allow — shard/subtree gating
@@ -38,7 +38,7 @@ import (
 )
 
 const (
-	recvBufSize = frame.HeaderSize + frame.MaxPayload
+	recvBufSize = 4 * 1024 * 1024 // per-worker UDP receive buffer
 
 	// socketRecvBuf is the UDP receive buffer requested on each worker socket.
 	socketRecvBuf = 64 * 1024 * 1024 // 64 MiB

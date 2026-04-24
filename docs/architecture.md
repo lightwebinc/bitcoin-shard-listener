@@ -62,7 +62,7 @@ Offset  Size  Field
     48     4  Shard Sequence Number uint32 BE; monotonic counter; 0 = unset
     52     4  Reserved              padding; must be 0x00000000
     56    32  Subtree ID            32-byte batch identifier; zeros = unset
-    88     4  Payload length        uint32 BE; max 10 MiB
+    88     4  Payload length        uint32 BE
     92     *  BSV tx payload
 ```
 
