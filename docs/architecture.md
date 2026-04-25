@@ -35,7 +35,7 @@ Each worker:
 3. Calls `frame.Decode`, `shard.Engine.GroupIndex`, `filter.Allow`, and
    `egress.Send` in the hot path for every received datagram.
 4. Calls `nack.Tracker.Observe` for BRC-122 frames with non-zero `SenderID` and
-   `ShardSeqNum`.
+   `SeqNum`.
 
 **SO_REUSEPORT and multicast:** Linux does **not** load-balance multicast
 datagrams across SO_REUSEPORT sockets — every socket that has joined the group
@@ -69,7 +69,7 @@ Offset  Size  Field
 `SenderID` is stamped in-place by the proxy as the CRC32c (Castagnoli) of the
 TCP/UDP source IPv6 address. Collision risk is minimal on realistic BSV
 networks (~1,000 mining nodes, ~12-20 core transaction processors). Gap tracking
-is skipped when `SenderID` is zero (field unset) or `ShardSeqNum` is zero.
+is skipped when `SenderID` is zero (field unset) or `SeqNum` is zero.
 
 ## Gap tracking (NACK / NORM-inspired)
 
@@ -99,7 +99,7 @@ A background sweeper fires every 100 ms:
 Filtering is pure (no I/O) and allocation-free on the hot path:
 
 | Config | Behaviour |
-|---|---|
+|-----------------------------|---------------------------------------|
 | `shard-include` empty | all shard indices accepted |
 | `shard-include` non-empty | only listed indices accepted |
 | `subtree-include` empty | all SubtreeIDs accepted |
@@ -109,7 +109,7 @@ Filtering is pure (no I/O) and allocation-free on the hot path:
 ## V1 frame support
 
 `frame.Decode` accepts both v1 (44-byte header) and BRC-122 (92-byte header) frames.
-v1 frames are decoded with zero-valued `ShardSeqNum`, `SubtreeID`,
+v1 frames are decoded with zero-valued `SeqNum`, `SubtreeID`,
 `SenderID`, and `SequenceID`. Shard filtering applies to v1 frames normally;
 subtree filtering has no effect (zero `SubtreeID` passes all include/exclude checks).
 Gap tracking is skipped for v1 frames because `SenderID` is zero.
@@ -119,7 +119,7 @@ Gap tracking is skipped for v1 frames because `SenderID` is zero.
 A single `egress.Sender` per worker delivers frames to `egress-addr`:
 
 | `egress-proto` | Behaviour |
-|---|---|
+|----------------|-------------------------------------------------------|
 | `udp` | `net.DialUDP` on startup; `Write` per frame |
 | `tcp` | lazy connect on first frame; reconnect on write error |
 

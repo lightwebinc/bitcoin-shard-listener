@@ -12,7 +12,7 @@
 //	     8    32  TxID               — identifies the missing frame
 //	    40     4  SenderID           — CRC32c of IPv6; 0 = unknown
 //	    44     4  SequenceID         — flow identifier; 0 = unknown
-//	    48     4  ShardSeqNum        — sender's sequence number; 0 = unknown
+//	    48     4  SeqNum        — sender's sequence number; 0 = unknown
 //	    52     4  Reserved           — padding; must be 0x00000000
 //
 // The MISS datagram is the optional 8-byte "not found" response from a retry
@@ -47,7 +47,7 @@ type NACK struct {
 	TxID        [32]byte
 	SenderID    uint32
 	SequenceID  uint32
-	ShardSeqNum uint32
+	SeqNum uint32
 }
 
 // Encode serialises n into buf (must be at least [NACKSize] bytes).
@@ -60,7 +60,7 @@ func Encode(n *NACK, buf []byte) {
 	copy(buf[8:40], n.TxID[:])
 	binary.BigEndian.PutUint32(buf[40:44], n.SenderID)
 	binary.BigEndian.PutUint32(buf[44:48], n.SequenceID)
-	binary.BigEndian.PutUint32(buf[48:52], n.ShardSeqNum)
+	binary.BigEndian.PutUint32(buf[48:52], n.SeqNum)
 	binary.BigEndian.PutUint32(buf[52:56], 0) // reserved padding
 }
 
@@ -82,7 +82,7 @@ func Decode(buf []byte) (*NACK, error) {
 	copy(n.TxID[:], buf[8:40])
 	n.SenderID = binary.BigEndian.Uint32(buf[40:44])
 	n.SequenceID = binary.BigEndian.Uint32(buf[44:48])
-	n.ShardSeqNum = binary.BigEndian.Uint32(buf[48:52])
+	n.SeqNum = binary.BigEndian.Uint32(buf[48:52])
 	return n, nil
 }
 

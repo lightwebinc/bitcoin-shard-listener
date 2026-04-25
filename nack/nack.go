@@ -248,7 +248,7 @@ func (t *Tracker) sendNACK(e *gapEntry) {
 	n := &NACK{
 		MsgType:     MsgTypeNACK,
 		TxID:        e.txid,
-		ShardSeqNum: e.seq,
+		SeqNum: e.seq,
 		SenderID:    e.senderID,
 		SequenceID:  e.sequenceID,
 	}

@@ -15,7 +15,7 @@ func TestEncodeDecodeNACK(t *testing.T) {
 		TxID:        txid,
 		SenderID:    0xAABBCCDD,
 		SequenceID:  0x11223344,
-		ShardSeqNum: 0xDEADBEEF,
+		SeqNum: 0xDEADBEEF,
 	}
 
 	var buf [nack.NACKSize]byte
@@ -37,8 +37,8 @@ func TestEncodeDecodeNACK(t *testing.T) {
 	if got.SequenceID != n.SequenceID {
 		t.Errorf("SequenceID = %d, want %d", got.SequenceID, n.SequenceID)
 	}
-	if got.ShardSeqNum != n.ShardSeqNum {
-		t.Errorf("ShardSeqNum = %d, want %d", got.ShardSeqNum, n.ShardSeqNum)
+	if got.SeqNum != n.SeqNum {
+		t.Errorf("SeqNum = %d, want %d", got.SeqNum, n.SeqNum)
 	}
 }
 

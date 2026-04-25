@@ -12,7 +12,7 @@
 // # Hot path per frame
 //
 //  1. ReadFrom (per-worker receive buffer)
-//  2. frame.Decode — extract TxID, Version, ShardSeqNum, SenderID
+//  2. frame.Decode — extract TxID, Version, SeqNum, SenderID
 //  3. shard.Engine.GroupIndex — derive groupIdx from TxID
 //  4. filter.Filter.Allow — shard/subtree gating
 //  5. egress.Sender.Send — unicast forward to downstream
@@ -200,16 +200,16 @@ func (w *Worker) processFrame(raw []byte) {
 	// Gap tracking: BRC-122 only, both SenderID and SeqNum must be non-zero.
 	if w.tracker != nil &&
 		f.Version == frame.FrameVerBRC122 &&
-		f.ShardSeqNum != 0 &&
+		f.SeqNum != 0 &&
 		f.SenderID != 0 {
-		w.tracker.Observe(f.SenderID, groupIdx, f.ShardSeqNum, f.SequenceID, f.TxID)
+		w.tracker.Observe(f.SenderID, groupIdx, f.SeqNum, f.SequenceID, f.TxID)
 	}
 
 	if w.debug {
 		w.log.Debug("frame forwarded",
 			"version", f.Version,
 			"group", groupIdx,
-			"seq", f.ShardSeqNum,
+			"seq", f.SeqNum,
 		)
 	}
 }

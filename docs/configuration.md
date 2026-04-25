@@ -19,7 +19,7 @@ UDP port to receive multicast frames on. Must match the proxy's egress port.
 Multicast scope nibble. Must match the proxy's `-scope`.
 
 | Value | Prefix | Reach |
-|---|---|---|
+|----------|--------|-----------------------------------------------------|
 | `link` | `FF02` | Same L2 segment only |
 | `site` | `FF05` | Site-local; crosses routers within a site (default) |
 | `org` | `FF08` | Organisation-wide |
@@ -41,7 +41,7 @@ Txid prefix bit width used as the shard key. Must exactly match the proxy's
 `-shard-bits`. Determines how many multicast groups exist (2ᴺ).
 
 | Bits | Groups |
-|---|---|
+|------|------------|
 | 1 | 2 |
 | 2 | 4 |
 | 8 | 256 |
@@ -88,7 +88,7 @@ header). When `false`, the complete 92-byte BRC-122 frame is forwarded verbatim.
 ## NACK / Gap Recovery
 
 Gap tracking is performed for BRC-122 frames where both `SenderID` (bytes 40–43,
-CRC32c of source IPv6) and `ShardSeqNum` (bytes 48–51) are non-zero.
+CRC32c of source IPv6) and `SeqNum` (bytes 48–51) are non-zero.
 
 A zero `SenderID` means the proxy has not yet stamped the field and gap tracking
 is skipped for that frame.
