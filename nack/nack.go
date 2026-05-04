@@ -8,6 +8,7 @@ import (
 	"sync"
 	"time"
 
+	"github.com/lightwebinc/bitcoin-shard-listener/discovery"
 	"github.com/lightwebinc/bitcoin-shard-listener/metrics"
 )
 
@@ -36,7 +37,7 @@ type gapEntry struct {
 	retries     int
 	nextAttempt time.Time
 	deadline    time.Time // absolute eviction deadline (= detectedAt + GapTTL)
-	endpointIdx int       // round-robin index into retry endpoints
+	endpointIdx int       // index into registry snapshot for escalation
 }
 
 // senderState holds per-(senderID, groupIdx) tracking state.
@@ -49,29 +50,52 @@ type senderState struct {
 // begin background GC and NACK dispatch.
 type Tracker struct {
 	cfg            TrackerConfig
-	retryEndpoints []string
+	retryEndpoints []string // static seed endpoints (fallback)
 	iface          *net.Interface
 	rec            *metrics.Recorder
 	log            *slog.Logger
+	registry       *discovery.Registry
+	respTimeout    time.Duration // deadline for ACK/MISS response (default 300ms)
+	maxConcurrent  int           // semaphore bound for concurrent sendNACK goroutines
 
 	mu     sync.Mutex
 	states map[senderGroupKey]*senderState
 
 	// nackQueue receives gap entries ready for NACK dispatch.
 	nackQueue chan *gapEntry
+
+	// sem bounds concurrent sendNACK goroutines.
+	sem chan struct{}
 }
 
-// New constructs a Tracker. retryEndpoints is the list of host:port retry nodes.
-// iface is used for potential future multicast NACK send (currently unicast UDP).
-func New(cfg TrackerConfig, retryEndpoints []string, iface *net.Interface, rec *metrics.Recorder) *Tracker {
+// New constructs a Tracker. retryEndpoints is the static seed list.
+// registry is the dynamic endpoint registry from beacon discovery (may be nil
+// to use only static seeds). iface is used for potential future multicast
+// NACK send (currently unicast UDP).
+func New(cfg TrackerConfig, retryEndpoints []string, iface *net.Interface, rec *metrics.Recorder, registry *discovery.Registry) *Tracker {
+	const defaultMaxConcurrent = 64
+	const defaultRespTimeout = 300 * time.Millisecond
+
+	if registry == nil {
+		registry = discovery.NewRegistry()
+	}
+	// Seed static endpoints at lowest priority.
+	if len(retryEndpoints) > 0 {
+		registry.Seed(retryEndpoints)
+	}
+
 	return &Tracker{
 		cfg:            cfg,
 		retryEndpoints: retryEndpoints,
 		iface:          iface,
 		rec:            rec,
 		log:            slog.Default().With("component", "nack"),
+		registry:       registry,
+		respTimeout:    defaultRespTimeout,
+		maxConcurrent:  defaultMaxConcurrent,
 		states:         make(map[senderGroupKey]*senderState),
 		nackQueue:      make(chan *gapEntry, 4096),
+		sem:            make(chan struct{}, defaultMaxConcurrent),
 	}
 }
 
@@ -225,67 +249,154 @@ func (t *Tracker) sweepOnce(now time.Time) {
 	}
 }
 
-// dispatchLoop reads from nackQueue and sends NACK datagrams to retry endpoints.
+// dispatchLoop reads from nackQueue and launches bounded sendNACK goroutines.
 func (t *Tracker) dispatchLoop(ctx context.Context) {
 	for {
 		select {
 		case <-ctx.Done():
 			return
 		case e := <-t.nackQueue:
-			t.sendNACK(e)
+			// Acquire semaphore slot (bounded concurrency).
+			select {
+			case t.sem <- struct{}{}:
+			case <-ctx.Done():
+				return
+			}
+			go func() {
+				defer func() { <-t.sem }()
+				t.sendNACK(e)
+			}()
 		}
 	}
 }
 
 func (t *Tracker) sendNACK(e *gapEntry) {
-	if len(t.retryEndpoints) == 0 {
+	snap := t.registry.Snapshot()
+	if len(snap) == 0 {
 		return
 	}
 
-	endpoint := t.retryEndpoints[e.endpointIdx%len(t.retryEndpoints)]
+	idx := e.endpointIdx % len(snap)
+	endpoint := snap[idx]
 
 	var buf [NACKSize]byte
 	n := &NACK{
-		MsgType:     MsgTypeNACK,
-		TxID:        e.txid,
-		SeqNum: e.seq,
-		SenderID:    e.senderID,
-		SequenceID:  e.sequenceID,
+		MsgType:    MsgTypeNACK,
+		TxID:       e.txid,
+		SeqNum:     e.seq,
+		SenderID:   e.senderID,
+		SequenceID: e.sequenceID,
 	}
 	Encode(n, buf[:])
 
-	addr, err := net.ResolveUDPAddr("udp", endpoint)
+	addr, err := net.ResolveUDPAddr("udp", endpoint.Addr)
 	if err != nil {
-		t.log.Warn("NACK: cannot resolve retry endpoint", "endpoint", endpoint, "err", err)
-	} else {
-		conn, err := net.DialUDP("udp", nil, addr)
-		if err == nil {
-			_, _ = conn.Write(buf[:])
-			_ = conn.Close()
-			if t.rec != nil {
-				t.rec.NACKDispatched()
-			}
-			t.log.Debug("NACK dispatched",
-				"endpoint", endpoint,
-				"seq", e.seq,
-				"retry", e.retries+1,
-			)
-		}
+		t.log.Warn("NACK: cannot resolve retry endpoint", "endpoint", endpoint.Addr, "err", err)
+		t.advanceEndpoint(e, false)
+		return
 	}
 
-	// Update retry state under lock.
+	// Ephemeral UDP socket: send NACK and wait for response.
+	conn, err := net.DialUDP("udp", nil, addr)
+	if err != nil {
+		t.log.Warn("NACK: dial failed", "endpoint", endpoint.Addr, "err", err)
+		t.advanceEndpoint(e, false)
+		return
+	}
+	defer conn.Close()
+
+	_, _ = conn.Write(buf[:])
+	if t.rec != nil {
+		t.rec.NACKDispatched()
+	}
+	t.log.Debug("NACK dispatched",
+		"endpoint", endpoint.Addr,
+		"tier", endpoint.Tier,
+		"seq", e.seq,
+		"retry", e.retries+1,
+	)
+
+	// Wait for ACK/MISS response.
+	_ = conn.SetReadDeadline(time.Now().Add(t.respTimeout))
+	var respBuf [ResponseSize + 16]byte
+	nr, err := conn.Read(respBuf[:])
+	if err != nil {
+		// Timeout — apply exponential backoff.
+		t.advanceEndpoint(e, false)
+		return
+	}
+
+	resp, err := DecodeResponse(respBuf[:nr])
+	if err != nil {
+		t.log.Debug("NACK: invalid response", "endpoint", endpoint.Addr, "err", err)
+		t.advanceEndpoint(e, false)
+		return
+	}
+
+	switch resp.MsgType {
+	case MsgTypeACK:
+		// Frame found and retransmit dispatched — cancel gap.
+		t.cancelGap(e)
+		t.log.Debug("NACK: ACK received, gap cancelled",
+			"endpoint", endpoint.Addr,
+			"seq", e.seq,
+			"flags", resp.Flags,
+		)
+	case MsgTypeMISS:
+		// Cache miss — advance to next endpoint immediately (no backoff).
+		t.log.Debug("NACK: MISS received, advancing endpoint",
+			"endpoint", endpoint.Addr,
+			"seq", e.seq,
+		)
+		t.advanceEndpoint(e, true)
+	}
+}
+
+// advanceEndpoint updates retry state after a NACK attempt.
+// If immediate is true (MISS), next attempt is now (no backoff); if false
+// (timeout or error), exponential backoff is applied.
+func (t *Tracker) advanceEndpoint(e *gapEntry, immediate bool) {
 	t.mu.Lock()
+	defer t.mu.Unlock()
+
+	key := senderGroupKey{senderID: e.senderID, groupIdx: e.groupIdx, sequenceID: e.sequenceID}
+	st, ok := t.states[key]
+	if !ok {
+		return
+	}
+	entry, ok := st.pending[e.seq]
+	if !ok {
+		return
+	}
+
+	entry.retries++
+	entry.endpointIdx++
+
+	if immediate {
+		// MISS: retry immediately with the next endpoint.
+		entry.nextAttempt = time.Now()
+	} else {
+		// Timeout/error: exponential backoff.
+		backoff := time.Duration(1<<uint(entry.retries)) * 500 * time.Millisecond
+		if backoff > t.cfg.BackoffMax {
+			backoff = t.cfg.BackoffMax
+		}
+		entry.nextAttempt = time.Now().Add(backoff)
+	}
+}
+
+// cancelGap removes a gap entry after receiving an ACK.
+func (t *Tracker) cancelGap(e *gapEntry) {
+	t.mu.Lock()
+	defer t.mu.Unlock()
+
 	key := senderGroupKey{senderID: e.senderID, groupIdx: e.groupIdx, sequenceID: e.sequenceID}
 	if st, ok := t.states[key]; ok {
-		if entry, ok := st.pending[e.seq]; ok {
-			entry.retries++
-			entry.endpointIdx++
-			backoff := time.Duration(1<<uint(entry.retries)) * 500 * time.Millisecond
-			if backoff > t.cfg.BackoffMax {
-				backoff = t.cfg.BackoffMax
+		if _, found := st.pending[e.seq]; found {
+			delete(st.pending, e.seq)
+			if t.rec != nil {
+				t.rec.GapSuppressed()
 			}
-			entry.nextAttempt = time.Now().Add(backoff)
 		}
 	}
-	t.mu.Unlock()
 }

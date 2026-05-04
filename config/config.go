@@ -22,6 +22,9 @@
 //	-nack-backoff-max     NACK_BACKOFF_MAX      5s               Cap on exponential backoff per gap
 //	-nack-max-retries     NACK_MAX_RETRIES      5                Max NACK attempts per gap
 //	-nack-gap-ttl         NACK_GAP_TTL         10m              Max gap state lifetime
+//	-beacon-enabled       BEACON_ENABLED       true             Enable ADVERT beacon listener
+//	-beacon-port          BEACON_PORT          9300             UDP port for beacon reception
+//	-beacon-scope         BEACON_SCOPE         site             Multicast scope for beacon groups
 //	-workers              NUM_WORKERS          NumCPU           Receive goroutine count
 //	-debug                DEBUG                false            Per-frame logging
 //	-metrics-addr         METRICS_ADDR         :9200            Prometheus / healthz / readyz
@@ -78,6 +81,11 @@ type Config struct {
 	NACKMaxRetries int
 	NACKGapTTL     time.Duration
 
+	// Beacon discovery (BRC-125)
+	BeaconEnabled bool
+	BeaconPort    int
+	BeaconScope   string // multicast scope for beacon group joins
+
 	// Runtime
 	NumWorkers   int
 	Debug        bool
@@ -125,6 +133,12 @@ func Load() (*Config, error) {
 		"max NACK attempts per gap before declaring unrecoverable")
 	flag.DurationVar(&c.NACKGapTTL, "nack-gap-ttl", envDuration("NACK_GAP_TTL", 10*time.Minute),
 		"max time to hold a gap entry before evicting (~Bitcoin block interval)")
+	flag.BoolVar(&c.BeaconEnabled, "beacon-enabled", envBool("BEACON_ENABLED", true),
+		"enable ADVERT beacon listener for dynamic endpoint discovery")
+	flag.IntVar(&c.BeaconPort, "beacon-port", envInt("BEACON_PORT", 9300),
+		"UDP port for receiving ADVERT beacons")
+	flag.StringVar(&c.BeaconScope, "beacon-scope", envStr("BEACON_SCOPE", "site"),
+		"multicast scope for beacon group joins: link | site | org | global")
 	flag.IntVar(&c.NumWorkers, "workers", envInt("NUM_WORKERS", runtime.NumCPU()),
 		"number of worker goroutines (0 = runtime.NumCPU)")
 	flag.BoolVar(&c.Debug, "debug", envBool("DEBUG", false),

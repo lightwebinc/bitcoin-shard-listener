@@ -1,5 +1,6 @@
 // Package nack implements NORM-inspired multicast gap recovery for
-// bitcoin-shard-listener. This file defines the 56-byte NACK wire format.
+// bitcoin-shard-listener. This file defines the 56-byte NACK request wire format
+// and the 24-byte ACK/MISS response wire format (BRC-125).
 //
 // # NACK datagram (UDP, 56 bytes, 8-byte aligned)
 //
@@ -7,7 +8,7 @@
 //	------  ----  -----
 //	     0     4  Magic (0xE3E1F3E8)  — BSV mainnet magic for tap/mirror/span identification
 //	     4     2  ProtoVer (0x02BF)
-//	     6     1  MsgType = 0x10 (NACK) or 0x11 (MISS)
+//	     6     1  MsgType = 0x10 (NACK)
 //	     7     1  Reserved = 0x00
 //	     8    32  TxID               — identifies the missing frame
 //	    40     4  SenderID           — CRC32c of IPv6; 0 = unknown
@@ -15,8 +16,18 @@
 //	    48     4  SeqNum             — sender's sequence number; 0 = unknown
 //	    52     4  Reserved           — padding; must be 0x00000000
 //
-// The MISS datagram is the optional 8-byte "not found" response from a retry
-// endpoint (MsgType=0x11). Only the first 8 bytes are meaningful.
+// # Response datagram (MISS/ACK, UDP, 24 bytes)
+//
+//	Offset  Size  Field
+//	------  ----  -----
+//	     0     4  Magic (0xE3E1F3E8)
+//	     4     2  ProtoVer (0x02BF)
+//	     6     1  MsgType = 0x11 (MISS) or 0x12 (ACK)
+//	     7     1  Flags (ACK: 0x01=multicast_sent, 0x02=unicast_sent)
+//	     8     4  SenderID    — echoed from NACK
+//	    12     4  SequenceID  — echoed from NACK
+//	    16     4  SeqNum      — echoed from NACK
+//	    20     4  Reserved
 package nack
 
 import (
@@ -34,12 +45,26 @@ const (
 	// MsgTypeMISS identifies a "frame not in cache" response from a retry endpoint.
 	MsgTypeMISS byte = 0x11
 
+	// MsgTypeACK identifies a "frame found, retransmit dispatched" response
+	// from a retry endpoint (BRC-125).
+	MsgTypeACK byte = 0x12
+
+	// ResponseSize is the fixed size of a MISS or ACK response datagram.
+	ResponseSize = 24
+
 	nackMagic    uint32 = 0xE3E1F3E8
 	nackProtoVer uint16 = 0x02BF
 )
 
-// ErrBadNACK is returned when a received datagram does not decode as a valid NACK.
-var ErrBadNACK = errors.New("nack: invalid datagram")
+// Sentinel errors.
+var (
+	// ErrBadNACK is returned when a received datagram does not decode as a valid NACK.
+	ErrBadNACK = errors.New("nack: invalid datagram")
+
+	// ErrBadResponse is returned when a received datagram does not decode as a
+	// valid MISS or ACK response.
+	ErrBadResponse = errors.New("nack: invalid response datagram")
+)
 
 // NACK is the in-memory representation of a NACK or MISS datagram.
 type NACK struct {
@@ -75,7 +100,7 @@ func Decode(buf []byte) (*NACK, error) {
 		return nil, ErrBadNACK
 	}
 	mt := buf[6]
-	if mt != MsgTypeNACK && mt != MsgTypeMISS {
+	if mt != MsgTypeNACK {
 		return nil, ErrBadNACK
 	}
 	n := &NACK{MsgType: mt}
@@ -86,12 +111,47 @@ func Decode(buf []byte) (*NACK, error) {
 	return n, nil
 }
 
-// DecodeMISS returns true if buf is a valid MISS response (8-byte minimum).
-// Only the first 8 bytes are examined.
-func DecodeMISS(buf []byte) bool {
-	if len(buf) < 8 {
-		return false
+// Response is the in-memory representation of a 24-byte MISS or ACK response.
+type Response struct {
+	MsgType    byte
+	Flags      byte
+	SenderID   uint32
+	SequenceID uint32
+	SeqNum     uint32
+}
+
+// EncodeResponse serialises r into buf (must be at least [ResponseSize] bytes).
+func EncodeResponse(r *Response, buf []byte) {
+	_ = buf[ResponseSize-1] // bounds check
+	binary.BigEndian.PutUint32(buf[0:4], nackMagic)
+	binary.BigEndian.PutUint16(buf[4:6], nackProtoVer)
+	buf[6] = r.MsgType
+	buf[7] = r.Flags
+	binary.BigEndian.PutUint32(buf[8:12], r.SenderID)
+	binary.BigEndian.PutUint32(buf[12:16], r.SequenceID)
+	binary.BigEndian.PutUint32(buf[16:20], r.SeqNum)
+	binary.BigEndian.PutUint32(buf[20:24], 0) // reserved
+}
+
+// DecodeResponse parses a MISS or ACK response from buf.
+// Returns [ErrBadResponse] if the datagram is too short, magic is wrong,
+// or MsgType is not MISS or ACK.
+func DecodeResponse(buf []byte) (*Response, error) {
+	if len(buf) < ResponseSize {
+		return nil, ErrBadResponse
 	}
-	return binary.BigEndian.Uint32(buf[0:4]) == nackMagic &&
-		buf[6] == MsgTypeMISS
+	if binary.BigEndian.Uint32(buf[0:4]) != nackMagic {
+		return nil, ErrBadResponse
+	}
+	mt := buf[6]
+	if mt != MsgTypeMISS && mt != MsgTypeACK {
+		return nil, ErrBadResponse
+	}
+	return &Response{
+		MsgType:    mt,
+		Flags:      buf[7],
+		SenderID:   binary.BigEndian.Uint32(buf[8:12]),
+		SequenceID: binary.BigEndian.Uint32(buf[12:16]),
+		SeqNum:     binary.BigEndian.Uint32(buf[16:20]),
+	}, nil
 }

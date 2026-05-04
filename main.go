@@ -84,6 +84,7 @@ func run() error {
 		cfg.RetryEndpoints,
 		cfg.Iface,
 		rec,
+		nil, // registry: nil uses only static seeds; beacon wiring added in future
 	)
 
 	done := make(chan struct{})
