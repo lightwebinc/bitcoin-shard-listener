@@ -1,5 +1,5 @@
 // Package nack implements NORM-inspired multicast gap recovery for
-// bitcoin-shard-listener. This file defines the 56-byte NACK wire format (BRC-122).
+// bitcoin-shard-listener. This file defines the 56-byte NACK wire format.
 //
 // # NACK datagram (UDP, 56 bytes, 8-byte aligned)
 //
@@ -12,7 +12,7 @@
 //	     8    32  TxID               — identifies the missing frame
 //	    40     4  SenderID           — CRC32c of IPv6; 0 = unknown
 //	    44     4  SequenceID         — flow identifier; 0 = unknown
-//	    48     4  SeqNum        — sender's sequence number; 0 = unknown
+//	    48     4  SeqNum             — sender's sequence number; 0 = unknown
 //	    52     4  Reserved           — padding; must be 0x00000000
 //
 // The MISS datagram is the optional 8-byte "not found" response from a retry
@@ -43,11 +43,11 @@ var ErrBadNACK = errors.New("nack: invalid datagram")
 
 // NACK is the in-memory representation of a NACK or MISS datagram.
 type NACK struct {
-	MsgType     byte
-	TxID        [32]byte
-	SenderID    uint32
-	SequenceID  uint32
-	SeqNum uint32
+	MsgType    byte
+	TxID       [32]byte
+	SenderID   uint32
+	SequenceID uint32
+	SeqNum     uint32
 }
 
 // Encode serialises n into buf (must be at least [NACKSize] bytes).
