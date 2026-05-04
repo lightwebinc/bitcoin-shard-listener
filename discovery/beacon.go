@@ -46,7 +46,7 @@ func (bl *BeaconListener) listenGroup(ctx context.Context, grp *net.UDPAddr) err
 	if err != nil {
 		return err
 	}
-	defer conn.Close()
+	defer func() { _ = conn.Close() }()
 
 	// Set a read buffer size
 	_ = conn.SetReadBuffer(1 << 16) // 64 KiB

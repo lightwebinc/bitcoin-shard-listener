@@ -303,7 +303,7 @@ func (t *Tracker) sendNACK(e *gapEntry) {
 		t.advanceEndpoint(e, false)
 		return
 	}
-	defer conn.Close()
+	defer func() { _ = conn.Close() }()
 
 	_, _ = conn.Write(buf[:])
 	if t.rec != nil {
