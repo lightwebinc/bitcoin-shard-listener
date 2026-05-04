@@ -296,16 +296,21 @@ func (t *Tracker) sendNACK(e *gapEntry) {
 		return
 	}
 
-	// Ephemeral UDP socket: send NACK and wait for response.
-	conn, err := net.DialUDP("udp", nil, addr)
+	// Ephemeral unconnected UDP socket: send NACK and wait for response.
+	// We intentionally avoid net.DialUDP (connected socket) because a
+	// connected socket filters incoming packets by exact source address.
+	// If the retry endpoint's kernel selects a SLAAC-derived source address
+	// instead of the static address the listener dialled, the ACK response
+	// is silently discarded. An unconnected socket accepts from any source.
+	conn, err := net.ListenPacket("udp", "[::]:0")
 	if err != nil {
-		t.log.Warn("NACK: dial failed", "endpoint", endpoint.Addr, "err", err)
+		t.log.Warn("NACK: listen failed", "endpoint", endpoint.Addr, "err", err)
 		t.advanceEndpoint(e, false)
 		return
 	}
 	defer func() { _ = conn.Close() }()
 
-	_, _ = conn.Write(buf[:])
+	_, _ = conn.WriteTo(buf[:], addr)
 	if t.rec != nil {
 		t.rec.NACKDispatched()
 	}
@@ -319,7 +324,7 @@ func (t *Tracker) sendNACK(e *gapEntry) {
 	// Wait for ACK/MISS response.
 	_ = conn.SetReadDeadline(time.Now().Add(t.respTimeout))
 	var respBuf [ResponseSize + 16]byte
-	nr, err := conn.Read(respBuf[:])
+	nr, _, err := conn.ReadFrom(respBuf[:])
 	if err != nil {
 		// Timeout — apply exponential backoff.
 		t.advanceEndpoint(e, false)
