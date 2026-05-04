@@ -197,7 +197,7 @@ func (w *Worker) processFrame(raw []byte) {
 		}
 	}
 
-	// Gap tracking: BRC-122 only, both SenderID and SeqNum must be non-zero.
+	// Gap tracking: BRC-124 only, both SenderID and SeqNum must be non-zero.
 	if w.tracker != nil &&
 		f.Version == frame.FrameVerBRC122 &&
 		f.SeqNum != 0 &&
