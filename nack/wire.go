@@ -1,6 +1,6 @@
 // Package nack implements NORM-inspired multicast gap recovery for
 // bitcoin-shard-listener. This file defines the 56-byte NACK request wire format
-// and the 24-byte ACK/MISS response wire format (BRC-125).
+// and the 24-byte ACK/MISS response wire format (BRC-TBD-retransmission).
 //
 // # NACK datagram (UDP, 56 bytes, 8-byte aligned)
 //
@@ -46,7 +46,7 @@ const (
 	MsgTypeMISS byte = 0x11
 
 	// MsgTypeACK identifies a "frame found, retransmit dispatched" response
-	// from a retry endpoint (BRC-125).
+	// from a retry endpoint (BRC-TBD-retransmission).
 	MsgTypeACK byte = 0x12
 
 	// ResponseSize is the fixed size of a MISS or ACK response datagram.

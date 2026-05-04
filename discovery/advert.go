@@ -1,5 +1,5 @@
 // Package discovery implements ADVERT beacon decoding and retry endpoint
-// registry management for bitcoin-shard-listener (BRC-125).
+// registry management for bitcoin-shard-listener (BRC-TBD-retransmission).
 package discovery
 
 import (
@@ -21,7 +21,7 @@ const (
 	advertProtoVer uint16 = 0x02BF
 )
 
-// ADVERT flag bits (BRC-125).
+// ADVERT flag bits (BRC-TBD-retransmission).
 const (
 	FlagHasParent          uint16 = 0x0002
 	FlagDraining           uint16 = 0x0004

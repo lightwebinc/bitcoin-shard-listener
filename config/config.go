@@ -81,7 +81,7 @@ type Config struct {
 	NACKMaxRetries int
 	NACKGapTTL     time.Duration
 
-	// Beacon discovery (BRC-125)
+	// Beacon discovery (BRC-TBD-retransmission)
 	BeaconEnabled bool
 	BeaconPort    int
 	BeaconScope   string // multicast scope for beacon group joins
