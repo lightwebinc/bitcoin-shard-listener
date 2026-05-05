@@ -46,20 +46,21 @@ const (
 
 // Worker is a single multicast receive goroutine.
 type Worker struct {
-	id      int
-	iface   *net.Interface
-	port    int
-	groups  []*net.UDPAddr // multicast groups to join
-	engine  *shard.Engine
-	filt    *filter.Filter
-	egr     *egress.Sender
-	tracker *nack.Tracker
-	rec     *metrics.Recorder
-	debug   bool
-	log     *slog.Logger
+	id       int
+	iface    *net.Interface
+	port     int
+	groups   []*net.UDPAddr // multicast groups to join
+	engine   *shard.Engine
+	filt     *filter.Filter
+	egr      *egress.Sender
+	mcastEgr *egress.MCastSender // nil when multicast egress is disabled
+	tracker  *nack.Tracker
+	rec      *metrics.Recorder
+	debug    bool
+	log      *slog.Logger
 }
 
-// New constructs a Worker.
+// New constructs a Worker. mcastEgr may be nil to disable multicast egress.
 func New(
 	id int,
 	iface *net.Interface,
@@ -68,22 +69,24 @@ func New(
 	engine *shard.Engine,
 	filt *filter.Filter,
 	egr *egress.Sender,
+	mcastEgr *egress.MCastSender,
 	tracker *nack.Tracker,
 	rec *metrics.Recorder,
 	debug bool,
 ) *Worker {
 	return &Worker{
-		id:      id,
-		iface:   iface,
-		port:    port,
-		groups:  groups,
-		engine:  engine,
-		filt:    filt,
-		egr:     egr,
-		tracker: tracker,
-		rec:     rec,
-		debug:   debug,
-		log:     slog.Default().With("component", "listener", "worker", id),
+		id:       id,
+		iface:    iface,
+		port:     port,
+		groups:   groups,
+		engine:   engine,
+		filt:     filt,
+		egr:      egr,
+		mcastEgr: mcastEgr,
+		tracker:  tracker,
+		rec:      rec,
+		debug:    debug,
+		log:      slog.Default().With("component", "listener", "worker", id),
 	}
 }
 
@@ -194,6 +197,20 @@ func (w *Worker) processFrame(raw []byte) {
 	} else {
 		if w.rec != nil {
 			w.rec.FrameForwarded(w.id, w.egr.Proto())
+		}
+	}
+
+	// Multicast egress fan-out: fires independently of unicast outcome.
+	if w.mcastEgr != nil {
+		if err := w.mcastEgr.Send(raw, f, groupIdx); err != nil {
+			if w.rec != nil {
+				w.rec.MCEgressError(w.id)
+			}
+			w.log.Debug("mc egress send error", "err", err)
+		} else {
+			if w.rec != nil {
+				w.rec.FrameForwarded(w.id, w.mcastEgr.Proto())
+			}
 		}
 	}
 

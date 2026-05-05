@@ -52,9 +52,18 @@ func run() error {
 		"listen_port", cfg.ListenPort,
 		"egress_addr", cfg.EgressAddr,
 		"egress_proto", cfg.EgressProto,
+		"mc_egress_enabled", cfg.MCEgressEnabled,
 		"workers", cfg.NumWorkers,
 		"retry_endpoints", len(cfg.RetryEndpoints),
 	)
+	if cfg.MCEgressEnabled {
+		slog.Info("multicast egress enabled",
+			"iface", cfg.MCEgressIface.Name,
+			"scope", cfg.MCEgressScope,
+			"port", cfg.MCEgressPort,
+			"hoplimit", cfg.MCEgressHopLimit,
+		)
+	}
 
 	rec, err := metrics.New(cfg.InstanceID, cfg.NumWorkers, cfg.OTLPEndpoint, cfg.OTLPInterval)
 	if err != nil {
@@ -137,7 +146,24 @@ func run() error {
 		}
 		defer func() { _ = egr.Close() }()
 
-		w := listener.New(i, cfg.Iface, cfg.ListenPort, groups, engine, filt, egr, tracker, rec, cfg.Debug)
+		var mcastEgr *egress.MCastSender
+		if cfg.MCEgressEnabled {
+			mcastEgr, err = egress.NewMCast(
+				cfg.MCEgressPrefix,
+				cfg.MCEgressMiddleBytes,
+				cfg.ShardBits,
+				cfg.MCEgressPort,
+				cfg.MCEgressIface,
+				cfg.MCEgressHopLimit,
+				cfg.StripHeader,
+			)
+			if err != nil {
+				return fmt.Errorf("mc egress worker %d: %w", i, err)
+			}
+			defer func() { _ = mcastEgr.Close() }()
+		}
+
+		w := listener.New(i, cfg.Iface, cfg.ListenPort, groups, engine, filt, egr, mcastEgr, tracker, rec, cfg.Debug)
 		wg.Add(1)
 		go func(worker *listener.Worker) {
 			defer wg.Done()

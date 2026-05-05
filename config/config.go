@@ -17,6 +17,12 @@
 //	-egress-addr          EGRESS_ADDR          127.0.0.1:9100   Downstream unicast host:port
 //	-egress-proto         EGRESS_PROTO         udp              udp | tcp
 //	-strip-header         STRIP_HEADER         false            Send payload-only
+//	-mc-egress-enabled    MC_EGRESS_ENABLED    false            Enable multicast egress
+//	-mc-egress-iface      MC_EGRESS_IFACE      (=iface)         Output NIC for multicast send
+//	-mc-egress-port       MC_EGRESS_PORT       (=listen-port)   Egress group UDP port
+//	-mc-egress-scope      MC_EGRESS_SCOPE      (=scope)         Multicast scope for egress groups
+//	-mc-egress-base-addr  MC_EGRESS_BASE_ADDR  (=mc-base-addr)  Base IPv6 for egress address space
+//	-mc-egress-hoplimit   MC_EGRESS_HOPLIMIT   1                IPV6_MULTICAST_HOPS
 //	-retry-endpoints      RETRY_ENDPOINTS                       Comma-separated host:port retry nodes
 //	-nack-jitter-max      NACK_JITTER_MAX      200ms            Max NACK suppression jitter
 //	-nack-backoff-max     NACK_BACKOFF_MAX      5s               Cap on exponential backoff per gap
@@ -81,6 +87,16 @@ type Config struct {
 	NACKMaxRetries int
 	NACKGapTTL     time.Duration
 
+	// Multicast egress (domain bridging)
+	MCEgressEnabled     bool
+	MCEgressIface       *net.Interface
+	MCEgressPort        int
+	MCEgressScope       string
+	MCEgressPrefix      uint16
+	MCEgressBaseAddr    string
+	MCEgressMiddleBytes [11]byte
+	MCEgressHopLimit    int
+
 	// Beacon discovery (BRC-TBD-retransmission)
 	BeaconEnabled bool
 	BeaconPort    int
@@ -123,6 +139,18 @@ func Load() (*Config, error) {
 		"egress protocol: udp | tcp")
 	flag.BoolVar(&c.StripHeader, "strip-header", envBool("STRIP_HEADER", false),
 		"send payload-only (no frame header) to egress")
+	flag.BoolVar(&c.MCEgressEnabled, "mc-egress-enabled", envBool("MC_EGRESS_ENABLED", false),
+		"enable multicast egress (domain bridging)")
+	mcEgressIfaceFlag := flag.String("mc-egress-iface", envStr("MC_EGRESS_IFACE", ""),
+		"network interface for multicast egress send (default: same as -iface)")
+	flag.IntVar(&c.MCEgressPort, "mc-egress-port", envInt("MC_EGRESS_PORT", 0),
+		"UDP destination port for egress multicast groups (default: same as -listen-port)")
+	flag.StringVar(&c.MCEgressScope, "mc-egress-scope", envStr("MC_EGRESS_SCOPE", ""),
+		"multicast scope for egress groups: link | site | org | global (default: same as -scope)")
+	flag.StringVar(&c.MCEgressBaseAddr, "mc-egress-base-addr", envStr("MC_EGRESS_BASE_ADDR", ""),
+		"base IPv6 for egress multicast group address space (default: same as -mc-base-addr)")
+	flag.IntVar(&c.MCEgressHopLimit, "mc-egress-hoplimit", envInt("MC_EGRESS_HOPLIMIT", 1),
+		"IPv6 multicast hop limit for egress datagrams (IPV6_MULTICAST_HOPS)")
 	retryFlag := flag.String("retry-endpoints", envStr("RETRY_ENDPOINTS", ""),
 		"comma-separated host:port of multicast-retry caching nodes")
 	flag.DurationVar(&c.NACKJitterMax, "nack-jitter-max", envDuration("NACK_JITTER_MAX", 200*time.Millisecond),
@@ -202,6 +230,51 @@ func Load() (*Config, error) {
 		return nil, fmt.Errorf("interface %q not found: %w", *ifaceFlag, err)
 	}
 	c.Iface = iface
+
+	// Resolve multicast egress parameters (only when enabled).
+	// Placed after c.Iface is set so the default iface fallback is valid.
+	if c.MCEgressEnabled {
+		// Scope: default to ingress scope.
+		if c.MCEgressScope == "" {
+			c.MCEgressScope = c.MCScope
+		}
+		egressPrefix, ok := Scopes[c.MCEgressScope]
+		if !ok {
+			return nil, fmt.Errorf("mc-egress-scope %q unknown; valid values: link, site, org, global", c.MCEgressScope)
+		}
+		c.MCEgressPrefix = egressPrefix
+
+		// Base address: default to ingress middle bytes.
+		if c.MCEgressBaseAddr == "" {
+			c.MCEgressMiddleBytes = c.MCMiddleBytes
+		} else {
+			ip := net.ParseIP(c.MCEgressBaseAddr)
+			if ip == nil {
+				return nil, fmt.Errorf("invalid mc-egress-base-addr %q", c.MCEgressBaseAddr)
+			}
+			ip16 := ip.To16()
+			if ip16 == nil || ip.To4() != nil {
+				return nil, fmt.Errorf("mc-egress-base-addr must be IPv6, got %q", c.MCEgressBaseAddr)
+			}
+			copy(c.MCEgressMiddleBytes[:], ip16[2:13])
+		}
+
+		// Port: default to listen port.
+		if c.MCEgressPort == 0 {
+			c.MCEgressPort = c.ListenPort
+		}
+
+		// Interface: default to ingress interface (c.Iface already resolved above).
+		if *mcEgressIfaceFlag == "" {
+			c.MCEgressIface = c.Iface
+		} else {
+			mcIface, err := net.InterfaceByName(*mcEgressIfaceFlag)
+			if err != nil {
+				return nil, fmt.Errorf("mc-egress-iface %q not found: %w", *mcEgressIfaceFlag, err)
+			}
+			c.MCEgressIface = mcIface
+		}
+	}
 
 	// Parse retry endpoints.
 	for _, ep := range splitComma(*retryFlag) {

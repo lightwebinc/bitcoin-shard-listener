@@ -85,6 +85,73 @@ header). When `false`, the complete 92-byte BRC-124 frame is forwarded verbatim.
 
 ---
 
+## Multicast Egress (domain bridging)
+
+When multicast egress is enabled, every frame that passes the shard/subtree
+filter is re-emitted onto an IPv6 multicast address space in addition to the
+normal unicast downstream. This enables bridging between multicast domains with
+optional scope and/or address-space translation.
+
+The re-emitted frame uses the **same shard index** as the ingress group, but
+the destination address is computed with independently configurable scope,
+middle bytes, and port. The underlying socket sets `IPV6_MULTICAST_LOOP=0` so
+re-emitted frames are not received back by sockets on the sending host.
+
+### `-mc-egress-enabled` / `MC_EGRESS_ENABLED` (default: `false`)
+
+Set to `true` to enable multicast egress. All other `-mc-egress-*` flags are
+ignored when this is `false`.
+
+### `-mc-egress-iface` / `MC_EGRESS_IFACE` (default: same as `-iface`)
+
+Network interface for multicast send (`IPV6_MULTICAST_IF`). Defaults to the
+same interface used for ingress. Set to a different interface when bridging
+between two separate fabric segments.
+
+### `-mc-egress-port` / `MC_EGRESS_PORT` (default: same as `-listen-port`)
+
+UDP destination port written into egress multicast datagrams. Receivers on the
+downstream domain must listen on this port.
+
+### `-mc-egress-scope` / `MC_EGRESS_SCOPE` (default: same as `-scope`)
+
+Multicast scope for the egress group address space. Use a narrower scope (e.g.
+`link`) to confine re-emitted frames to an L2 segment, or a wider scope for
+routed delivery.
+
+| Value | Prefix | Reach |
+|----------|--------|-----------------------------------------------------|
+| `link` | `FF02` | Same L2 segment only |
+| `site` | `FF05` | Site-local; crosses routers within a site |
+| `org` | `FF08` | Organisation-wide |
+| `global` | `FF0E` | Internet-wide |
+
+### `-mc-egress-base-addr` / `MC_EGRESS_BASE_ADDR` (default: same as `-mc-base-addr`)
+
+Base IPv6 address for the egress multicast group address space (bytes 2–12).
+Leave unset to re-emit on the same operator prefix as ingress (only the scope
+changes). Set to a different prefix to bridge between unrelated address spaces.
+
+### `-mc-egress-hoplimit` / `MC_EGRESS_HOPLIMIT` (default: `1`)
+
+IPv6 multicast hop limit (`IPV6_MULTICAST_HOPS`). The default of `1` confines
+re-emitted frames to the directly attached network. Increase for routed
+multicast delivery (requires PIM or similar on intermediate routers).
+
+> **Firewall:** the egress interface OUTPUT chain must accept
+> `ip6 daddr ff00::/8 udp dport <mc-egress-port>`. The `bitcoin-listener`
+> Ansible role nft template should be extended with this rule when mc egress
+> is in use.
+
+> **Same address-space warning:** if `-mc-egress-scope` and
+> `-mc-egress-base-addr` match the ingress address space, re-emitted frames
+> will be visible to all other listeners joined to those groups on the same
+> fabric. `IPV6_MULTICAST_LOOP=0` prevents the sending host from re-ingesting
+> its own frames, but other hosts on the segment will receive duplicates unless
+> they are intentional downstream consumers.
+
+---
+
 ## NACK / Gap Recovery
 
 Gap tracking is performed for BRC-124 frames where `CurSeq` (bytes 48–55) is

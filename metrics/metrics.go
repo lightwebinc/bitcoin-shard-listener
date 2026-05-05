@@ -49,6 +49,9 @@ type Recorder struct {
 	framesForwarded metric.Int64Counter // by worker, proto
 	egressErrors    metric.Int64Counter
 
+	// Multicast egress counters
+	mcEgressErrors metric.Int64Counter
+
 	// NACK / gap counters
 	gapsDetected     metric.Int64Counter
 	gapsSuppressed   metric.Int64Counter // cancelled by retransmit fill or ACK response
@@ -147,6 +150,10 @@ func New(instanceID string, numWorkers int, otlpEndpoint string, otlpInterval ti
 		metric.WithDescription("Errors sending to downstream")); err != nil {
 		return nil, err
 	}
+	if r.mcEgressErrors, err = meter.Int64Counter("bsl_mc_egress_errors_total",
+		metric.WithDescription("Errors sending to multicast egress")); err != nil {
+		return nil, err
+	}
 	if r.gapsDetected, err = meter.Int64Counter("bsl_gaps_detected_total",
 		metric.WithDescription("Sequence gaps detected (missing frames)")); err != nil {
 		return nil, err
@@ -197,6 +204,13 @@ func (r *Recorder) FrameForwarded(workerID int, proto string) {
 // EgressError records a send failure to downstream.
 func (r *Recorder) EgressError(workerID int) {
 	r.egressErrors.Add(context.Background(), 1, metric.WithAttributes(
+		attribute.Int("worker", workerID),
+	))
+}
+
+// MCEgressError records a send failure on the multicast egress path.
+func (r *Recorder) MCEgressError(workerID int) {
+	r.mcEgressErrors.Add(context.Background(), 1, metric.WithAttributes(
 		attribute.Int("worker", workerID),
 	))
 }
