@@ -90,7 +90,7 @@ A background sweeper fires every 100 ms:
   `bsl_gaps_unrecovered_total`.
 - Entries past `nextAttempt` with `retries < nack-max-retries` are dispatched
   to the `nackQueue`.
-- `nackQueue` consumers send 56-byte NACK datagrams to retry endpoints over
+- `nackQueue` consumers send 24-byte NACK datagrams to retry endpoints over
   unicast UDP. Retry intervals follow exponential backoff capped at
   `nack-backoff-max`.
 

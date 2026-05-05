@@ -365,6 +365,18 @@ func (t *Tracker) advanceEndpoint(e *gapEntry, immediate bool) {
 	}
 }
 
+// PendingGaps returns the total number of unresolved gap entries across all
+// groups. Useful for testing and diagnostics.
+func (t *Tracker) PendingGaps() int {
+	t.mu.Lock()
+	defer t.mu.Unlock()
+	total := 0
+	for _, st := range t.states {
+		total += len(st.pending)
+	}
+	return total
+}
+
 // cancelGap removes a gap entry after receiving an ACK.
 func (t *Tracker) cancelGap(e *gapEntry) {
 	t.mu.Lock()

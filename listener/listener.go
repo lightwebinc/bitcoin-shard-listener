@@ -12,11 +12,11 @@
 // # Hot path per frame
 //
 //  1. ReadFrom (per-worker receive buffer)
-//  2. frame.Decode — extract TxID, Version, SeqNum, SenderID
+//  2. frame.Decode — extract TxID, Version, PrevSeq, CurSeq
 //  3. shard.Engine.GroupIndex — derive groupIdx from TxID
 //  4. filter.Filter.Allow — shard/subtree gating
 //  5. egress.Sender.Send — unicast forward to downstream
-//  6. nack.Tracker.Observe — gap detection (V2 only, non-zero SenderID+SeqNum)
+//  6. nack.Tracker.Observe — gap detection (V2 only, non-zero CurSeq)
 package listener
 
 import (
