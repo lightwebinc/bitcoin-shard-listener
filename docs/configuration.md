@@ -87,11 +87,10 @@ header). When `false`, the complete 92-byte BRC-124 frame is forwarded verbatim.
 
 ## NACK / Gap Recovery
 
-Gap tracking is performed for BRC-124 frames where both `SenderID` (bytes 40–43,
-CRC32c of source IPv6) and `SeqNum` (bytes 48–51) are non-zero.
-
-A zero `SenderID` means the proxy has not yet stamped the field and gap tracking
-is skipped for that frame.
+Gap tracking is performed for BRC-124 frames where `CurSeq` (bytes 48–55) is
+non-zero. `CurSeq` is stamped in-place by the proxy as
+`XXH64(senderIPv6 ∥ groupIdx ∥ counter)`; a zero value means the proxy has not
+yet stamped the frame and gap tracking is skipped.
 
 ### `-retry-endpoints` / `RETRY_ENDPOINTS`
 
@@ -113,11 +112,52 @@ Cap on exponential backoff between successive NACK retries for the same gap.
 Maximum NACK attempts per gap. After this is exceeded the gap is declared
 unrecoverable and evicted (`bsl_gaps_unrecovered_total` incremented).
 
+> **Multi-endpoint deployments:** each MISS response advances to the next
+> endpoint, consuming one retry. With beacon discovery enabled and 3 retry
+> endpoints (3 beacon + 3 static seeds = 6 registry entries), set
+> `NACK_MAX_RETRIES=8` to ensure all entries are tried before eviction.
+
 ### `-nack-gap-ttl` / `NACK_GAP_TTL` (default: `10m`)
 
 Maximum lifetime of a gap entry before it is evicted regardless of retry
 count. Set to approximately one Bitcoin block interval to avoid accumulating
 stale state across block boundaries.
+
+---
+
+## Beacon Discovery
+
+### `-beacon-enabled` / `BEACON_ENABLED` (default: `true`)
+
+When true, join the beacon multicast group and dynamically discover retry
+endpoints from ADVERT datagrams broadcast by `bitcoin-retry-endpoint` instances.
+Discovered endpoints are merged into the NACK dispatch registry alongside any
+static seeds from `-retry-endpoints`.
+
+The registry is sorted by **(Tier ASC, Preference DESC)**. Beacon-discovered
+entries sort before static seeds (seeds use Tier=0xFF). Endpoints are evicted
+after 3 × their advertised interval without a refresh.
+
+### `-beacon-port` / `BEACON_PORT` (default: `9300`)
+
+UDP port for receiving ADVERT beacon datagrams. Must match the
+`-nack-port` / `NACK_PORT` of the retry endpoints.
+
+### `-beacon-scope` / `BEACON_SCOPE` (default: `site`)
+
+Multicast scope for the beacon group join. Must match the `-beacon-scope`
+used by the retry endpoints.
+
+| Value | Prefix | Reach |
+|--------|--------|---------------------------------------------------|
+| `link` | `FF02` | Same L2 segment only |
+| `site` | `FF05` | Site-local; crosses routers within a site |
+| `org` | `FF08` | Organisation-wide |
+| `global` | `FF0E` | Internet-wide |
+
+> **Firewall:** the listener's nftables input chain must accept UDP traffic on
+> `beacon-port` from the beacon multicast prefix (`ff00::/8`) on the fabric
+> interface. The `bitcoin-listener` Ansible role already includes this rule.
 
 ---
 
@@ -186,7 +226,7 @@ bitcoin-shard-listener \
   -egress-addr 127.0.0.1:9100
 ```
 
-## Example: shard filter + NACK
+## Example: shard filter + NACK with beacon discovery
 
 ```
 bitcoin-shard-listener \
@@ -195,8 +235,10 @@ bitcoin-shard-listener \
   -shard-include 0,1,2,3 \
   -egress-addr consumer.local:9100 \
   -egress-proto tcp \
-  -retry-endpoints retry1.local:9002,retry2.local:9002 \
+  -retry-endpoints retry1.local:9300,retry2.local:9300,retry3.local:9300 \
+  -beacon-enabled true \
+  -beacon-port 9300 \
   -nack-jitter-max 100ms \
-  -nack-max-retries 3 \
+  -nack-max-retries 8 \
   -metrics-addr :9200
 ```

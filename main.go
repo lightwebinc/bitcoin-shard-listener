@@ -18,6 +18,7 @@ import (
 	"github.com/lightwebinc/bitcoin-shard-common/shard"
 
 	"github.com/lightwebinc/bitcoin-shard-listener/config"
+	"github.com/lightwebinc/bitcoin-shard-listener/discovery"
 	"github.com/lightwebinc/bitcoin-shard-listener/egress"
 	"github.com/lightwebinc/bitcoin-shard-listener/filter"
 	"github.com/lightwebinc/bitcoin-shard-listener/listener"
@@ -73,6 +74,9 @@ func run() error {
 	// Build filter.
 	filt := filter.New(cfg.ShardInclude, cfg.SubtreeInclude, cfg.SubtreeExclude)
 
+	// Build the endpoint registry (beacon-discovered + static seeds).
+	reg := discovery.NewRegistry()
+
 	// Build NACK tracker.
 	tracker := nack.New(
 		nack.TrackerConfig{
@@ -84,7 +88,7 @@ func run() error {
 		cfg.RetryEndpoints,
 		cfg.Iface,
 		rec,
-		nil, // registry: nil uses only static seeds; beacon wiring added in future
+		reg,
 	)
 
 	done := make(chan struct{})
@@ -100,6 +104,30 @@ func run() error {
 		defer wg.Done()
 		rec.Serve(cfg.MetricsAddr, done)
 	}()
+
+	// Start beacon listener for dynamic endpoint discovery.
+	if cfg.BeaconEnabled {
+		beaconScopePrefix, ok := config.Scopes[cfg.BeaconScope]
+		if !ok {
+			beaconScopePrefix = 0xFF05
+		}
+		beaconIP := shard.ControlGroupAddr(beaconScopePrefix, cfg.MCMiddleBytes, shard.CtrlGroupBeacon)
+		beaconGrp := &net.UDPAddr{IP: beaconIP, Port: cfg.BeaconPort}
+		bl := &discovery.BeaconListener{
+			Registry: reg,
+			Groups:   []*net.UDPAddr{beaconGrp},
+			Iface:    cfg.Iface,
+			Debug:    cfg.Debug,
+		}
+		wg.Add(1)
+		go func() {
+			defer wg.Done()
+			if err := bl.Start(ctx); err != nil && ctx.Err() == nil {
+				slog.Error("beacon listener error", "err", err)
+			}
+		}()
+		slog.Info("beacon listener started", "group", beaconIP, "port", cfg.BeaconPort)
+	}
 
 	// Start workers.
 	for i := range cfg.NumWorkers {

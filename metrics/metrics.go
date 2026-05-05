@@ -51,7 +51,7 @@ type Recorder struct {
 
 	// NACK / gap counters
 	gapsDetected     metric.Int64Counter
-	gapsSuppressed   metric.Int64Counter // cancelled by multicast fill before NACK fired
+	gapsSuppressed   metric.Int64Counter // cancelled by retransmit fill or ACK response
 	nacksDispatched  metric.Int64Counter
 	nacksUnrecovered metric.Int64Counter // retries exhausted or TTL exceeded
 }
@@ -152,7 +152,7 @@ func New(instanceID string, numWorkers int, otlpEndpoint string, otlpInterval ti
 		return nil, err
 	}
 	if r.gapsSuppressed, err = meter.Int64Counter("bsl_gaps_suppressed_total",
-		metric.WithDescription("Gaps cancelled by multicast fill before NACK fired")); err != nil {
+		metric.WithDescription("Gaps cancelled by retransmit fill or ACK response")); err != nil {
 		return nil, err
 	}
 	if r.nacksDispatched, err = meter.Int64Counter("bsl_nacks_dispatched_total",
@@ -206,7 +206,7 @@ func (r *Recorder) GapDetected() {
 	r.gapsDetected.Add(context.Background(), 1)
 }
 
-// GapSuppressed records a gap cancelled by an incoming multicast fill.
+// GapSuppressed records a gap cancelled by a retransmit fill or ACK response.
 func (r *Recorder) GapSuppressed() {
 	r.gapsSuppressed.Add(context.Background(), 1)
 }

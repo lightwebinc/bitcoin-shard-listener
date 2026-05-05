@@ -121,7 +121,8 @@ func (t *Tracker) Observe(groupIdx uint32, prevSeq, curSeq uint64, txid [32]byte
 
 	// Gap detection: prevSeq should equal lastCurSeq for a contiguous chain.
 	// prevSeq == 0 signals the start of a new chain from the same group.
-	if prevSeq != 0 && prevSeq != st.lastCurSeq {
+	// prevSeq < lastCurSeq means an out-of-order or retransmitted frame — no gap.
+	if prevSeq != 0 && prevSeq != st.lastCurSeq && prevSeq > st.lastCurSeq {
 		// One or more frames are missing. The gap is bounded by:
 		//   prevSeq  = CurSeq of last good frame    (forward lookup key)
 		//   curSeq of gap = incoming f.PrevSeq       (backward lookup key)
@@ -143,7 +144,10 @@ func (t *Tracker) Observe(groupIdx uint32, prevSeq, curSeq uint64, txid [32]byte
 		}
 	}
 
-	st.lastCurSeq = curSeq
+	// Only advance lastCurSeq forward — never regress on retransmit/duplicate.
+	if curSeq > st.lastCurSeq {
+		st.lastCurSeq = curSeq
+	}
 }
 
 // Fill cancels a pending gap when a retransmitted frame arrives via multicast
@@ -215,11 +219,15 @@ func (t *Tracker) sweepOnce(now time.Time) {
 				continue
 			}
 			if now.After(e.nextAttempt) {
+				// Stamp nextAttempt before copying so concurrent sweeps do not
+				// re-enqueue the same gap while a sendNACK goroutine is in-flight.
+				e.nextAttempt = now.Add(t.respTimeout + 100*time.Millisecond)
 				entry := *e // shallow copy to avoid races
 				select {
 				case t.nackQueue <- &entry:
 				default:
-					// Queue full — skip this cycle; will retry next tick.
+					// Queue full — reset so this gap is retried next tick.
+					e.nextAttempt = now
 				}
 			}
 		}

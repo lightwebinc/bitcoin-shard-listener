@@ -108,20 +108,52 @@ func TestObserveGap_AutoClosed_WhenMatchingCurSeqArrives(t *testing.T) {
 		t.Fatalf("before auto-close: PendingGaps = %d, want 1", g)
 	}
 
-	// A frame arrives whose CurSeq == 200 (the missing frame's identity).
-	// Observe auto-closes pending[200] before gap-detection runs.
-	// However, the out-of-order arrival (prevSeq=100 != lastCurSeq=300) also
-	// creates a new spurious entry, so total PendingGaps remains 1.
+	// A frame arrives whose CurSeq == 200 (the missing frame's identity,
+	// arriving as an out-of-order retransmit: prevSeq=100 < lastCurSeq=300).
+	// Observe auto-closes pending[200] via the fill check; because prevSeq < lastCurSeq
+	// no new phantom gap is created — PendingGaps drops to 0.
 	tr.Observe(0, 100, 200, [32]byte{})
+	if g := tr.PendingGaps(); g != 0 {
+		t.Errorf("after retransmit fill: PendingGaps = %d, want 0 (no phantom gap)", g)
+	}
 
-	// Verify the original gap (key=200) was actually removed from pending by
-	// confirming that a subsequent Fill(0, 200) is a no-op.
+	// Confirm Fill is now a no-op (gap already removed).
 	beforeFill := tr.PendingGaps()
 	tr.Fill(0, 200)
 	afterFill := tr.PendingGaps()
 	if afterFill != beforeFill {
 		t.Errorf("Fill(200) changed PendingGaps %d→%d: original gap should already be closed by auto-close",
 			beforeFill, afterFill)
+	}
+}
+
+func TestObserveOutOfOrder_NoPhantomGap(t *testing.T) {
+	tr := newTestTracker()
+	// Establish chain up to curSeq=300 with a gap (curSeq=200 missing).
+	tr.Observe(0, 0, 100, [32]byte{})
+	tr.Observe(0, 200, 300, [32]byte{}) // gap key=200
+	if g := tr.PendingGaps(); g != 1 {
+		t.Fatalf("setup: PendingGaps = %d, want 1", g)
+	}
+
+	// Out-of-order retransmit of the missing frame arrives (prevSeq=100 < lastCurSeq=300).
+	// Must close the pending gap AND must NOT create a new phantom gap.
+	tr.Observe(0, 100, 200, [32]byte{})
+	if g := tr.PendingGaps(); g != 0 {
+		t.Errorf("after retransmit: PendingGaps = %d, want 0 (phantom gap created)", g)
+	}
+}
+
+func TestObserveOutOfOrder_LastCurSeqNotRegressed(t *testing.T) {
+	tr := newTestTracker()
+	tr.Observe(0, 0, 100, [32]byte{})
+	tr.Observe(0, 100, 200, [32]byte{})
+	// Old out-of-order duplicate arrives — must not regress lastCurSeq to 50.
+	tr.Observe(0, 20, 50, [32]byte{})
+	// A subsequent in-order frame (prevSeq=200) must NOT detect a gap.
+	tr.Observe(0, 200, 300, [32]byte{})
+	if g := tr.PendingGaps(); g != 0 {
+		t.Errorf("after retransmit + in-order: PendingGaps = %d, want 0", g)
 	}
 }
 

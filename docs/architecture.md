@@ -34,8 +34,7 @@ Each worker:
 2. Joins all configured multicast groups on the configured interface.
 3. Calls `frame.Decode`, `shard.Engine.GroupIndex`, `filter.Allow`, and
    `egress.Send` in the hot path for every received datagram.
-4. Calls `nack.Tracker.Observe` for BRC-124 frames with non-zero `SenderID` and
-   `SeqNum`.
+4. Calls `nack.Tracker.Observe` for BRC-124 frames with non-zero `CurSeq`.
 
 **SO_REUSEPORT and multicast:** Linux does **not** load-balance multicast
 datagrams across SO_REUSEPORT sockets — every socket that has joined the group
@@ -49,50 +48,85 @@ allowing multiple worker sockets to be tested in isolation.
 
 ## BRC-124 frame format (92 bytes)
 
+All multi-byte integers are big-endian. Layout is defined in
+`bitcoin-shard-common/frame/frame.go`.
+
 ```text
-Offset  Size  Field
-------  ----  -----
-     0     4  Network magic         0xE3E1F3E8
-     4     2  Protocol ver          0x02BF
-     6     1  Frame version         0x02 (BRC-124)
-     7     1  Reserved              0x00
-     8    32  Transaction ID        raw 256-bit txid (internal byte order)
-    40     4  Sender ID             CRC32c of IPv6; 0 = unset
-    44     4  Sequence ID           uint32 BE; random flow identifier; 0 = unset
-    48     4  Shard Sequence Number uint32 BE; monotonic counter; 0 = unset
-    52     4  Reserved              padding; must be 0x00000000
-    56    32  Subtree ID            32-byte batch identifier; zeros = unset
-    88     4  Payload length        uint32 BE
-    92     *  BSV tx payload
+Offset  Size  Align  Field          Value / notes
+------  ----  -----  -----          -------------
+     0     4   —     Network magic  0xE3E1F3E8
+     4     2   —     Protocol ver   0x02BF
+     6     1   —     Frame version  0x02 (BRC-124)
+     7     1   —     Reserved       0x00
+     8    32   8B    TxID           raw 256-bit txid (internal byte order)
+    40     8   8B    PrevSeq        XXH64 of previous chain state; 0 = unset
+    48     8   8B    CurSeq         XXH64 of current chain state; 0 = unset
+    56    32   8B    SubtreeID      32-byte batch identifier; zeros = unset
+    88     4   —     PayloadLen     uint32 BE
+    92     *   —     Payload        raw serialised BSV transaction
 ```
 
-`SenderID` is stamped in-place by the proxy as the CRC32c (Castagnoli) of the
-TCP/UDP source IPv6 address. Collision risk is minimal on realistic BSV
-networks (~1,000 mining nodes, ~12-20 core transaction processors). Gap tracking
-is skipped when `SenderID` is zero (field unset) or `SeqNum` is zero.
+`PrevSeq` and `CurSeq` form a hash chain: each frame's `PrevSeq` equals the
+`CurSeq` of its predecessor in the sender's per-(sender IP, group) sequence.
+Both are computed by the proxy (`bitcoin-shard-proxy`) as
+`XXH64(senderIPv6 ∥ groupIdx ∥ monotonicCounter)` and stamped in-place before
+multicast forwarding. Senders (generators) set both to zero. Gap tracking is
+skipped when `CurSeq` is zero.
 
 ## Gap tracking (NACK / NORM-inspired)
 
-State key: `(SenderID, groupIdx, SequenceID)`. Per-key state:
-- `highestConsec`: highest sequence number without a gap below it.
-- `pending`: map of missing sequence numbers to their `gapEntry`.
+State key: `groupIdx`. Per-group state:
+- `lastCurSeq`: the highest `CurSeq` seen so far for this group.
+- `pending`: map from `CurSeq` of the last-in-gap frame to a `gapEntry`.
 
-When seq arrives out-of-order (seq > highestConsec+1):
-1. Register all missing seqs between highestConsec+1 and seq-1 as `pending`.
-2. Advance `highestConsec` to seq.
+**Gap detection** (`nack.Tracker.Observe(groupIdx, prevSeq, curSeq, txID)`):
+- If `prevSeq != 0` and `prevSeq > lastCurSeq`: a gap exists (frames with
+  `CurSeq` in `(lastCurSeq, prevSeq]` are missing). A `gapEntry` is added to
+  `pending` keyed by `prevSeq`.
+- If the incoming `curSeq` matches a pending gap key, the gap is auto-closed
+  (retransmit arrived inline). `bsl_gaps_suppressed_total` is incremented.
+- Out-of-order or retransmitted frames (`prevSeq < lastCurSeq`) are silently
+  accepted; they never create new gap entries and never regress `lastCurSeq`.
+- `lastCurSeq` only advances forward.
 
-When a pending seq arrives (fill from multicast repair):
-1. Delete from `pending` — gap suppressed.
-2. `bsl_gaps_suppressed_total` incremented.
+**Gap fill** (`nack.Tracker.Fill(groupIdx, curSeq)`):
+- Called when a retransmit arrives via a NACK ACK response. Deletes the
+  matching `pending` entry and increments `bsl_gaps_suppressed_total`.
 
-A background sweeper fires every 100 ms:
-- Entries past `deadline` (= detected + `nack-gap-ttl`) are evicted as
-  `bsl_gaps_unrecovered_total`.
-- Entries past `nextAttempt` with `retries < nack-max-retries` are dispatched
-  to the `nackQueue`.
-- `nackQueue` consumers send 24-byte NACK datagrams to retry endpoints over
-  unicast UDP. Retry intervals follow exponential backoff capped at
-  `nack-backoff-max`.
+**Sweeper** — fires every 100 ms:
+- Entries past `deadline` (detected + `nack-gap-ttl`) are evicted;
+  `bsl_gaps_unrecovered_total` is incremented.
+- Entries past `nextAttempt` with `retries < nack-max-retries` are enqueued
+  on `nackQueue`. `nextAttempt` is advanced immediately before enqueue to
+  prevent the same gap from being re-dispatched before a response arrives.
+- `nackQueue` consumers send 24-byte NACK datagrams (forward by `PrevSeq` +
+  backward by `CurSeq`) to the current endpoint in the sorted registry.
+
+**NACK escalation** on endpoint response:
+- **ACK**: gap is cancelled (`Fill`); `bsl_gaps_suppressed_total` incremented.
+- **MISS**: endpoint index is advanced immediately (no backoff). The next sweep
+  dispatch targets the next endpoint in the sorted registry snapshot.
+- **Timeout** (no response within `respTimeout`): exponential backoff applied;
+  endpoint index unchanged.
+
+## Beacon discovery
+
+Retry endpoints multicast 56-byte ADVERT datagrams to the beacon group
+(`ff05::ff:fffd` for site scope, UDP port 9300 by default). Each ADVERT
+carries the endpoint's NACKAddr (unicast IPv6), tier, preference, and flags.
+
+The `discovery.BeaconListener` goroutine joins the beacon group and upserts
+endpoints into the `discovery.Registry` on each received ADVERT. The registry
+is sorted by **(Tier ASC, Preference DESC)**; beacon-discovered entries sort
+before static seeds (seeds use Tier=0xFF).
+
+Endpoints are evicted automatically after 3 × BeaconInterval without a refresh.
+The NACK tracker holds a snapshot of the registry at dispatch time, so evictions
+take effect at the next gap sweep without locking.
+
+Beacon discovery is enabled by default (`-beacon-enabled`). Static seeds
+(`-retry-endpoints`) provide a fallback when no beacons have been received yet
+or after eviction.
 
 ## Filter
 
