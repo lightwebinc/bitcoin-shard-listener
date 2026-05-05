@@ -1,6 +1,8 @@
 package nack_test
 
 import (
+	"context"
+	"net"
 	"testing"
 	"time"
 
@@ -174,5 +176,156 @@ func TestFill_MultipleGroups_OnlyClosesCorrectGroup(t *testing.T) {
 	tr.Fill(1, 700) // close group 1 gap
 	if g := tr.PendingGaps(); g != 0 {
 		t.Errorf("after Fill(group=1): PendingGaps = %d, want 0", g)
+	}
+}
+
+// ── sendNACK integration tests ──────────────────────────────────────────────
+//
+// These tests start the full Tracker (gcLoop + dispatchLoop) with a mock UDP
+// endpoint and verify that ACK/MISS/timeout are handled correctly.
+
+// pollGaps waits up to timeout for tr.PendingGaps() to equal want.
+func pollGaps(tr *nack.Tracker, want int, timeout time.Duration) int {
+	deadline := time.Now().Add(timeout)
+	for time.Now().Before(deadline) {
+		if tr.PendingGaps() == want {
+			return want
+		}
+		time.Sleep(25 * time.Millisecond)
+	}
+	return tr.PendingGaps()
+}
+
+func TestSendNACK_ACK_CancelsGap(t *testing.T) {
+	// Start a mock UDP endpoint that responds with ACK to any NACK.
+	mockConn, err := net.ListenPacket("udp", "[::1]:0")
+	if err != nil {
+		t.Skipf("UDP loopback unavailable: %v", err)
+	}
+	defer func() { _ = mockConn.Close() }()
+
+	go func() {
+		buf := make([]byte, 256)
+		for {
+			_, src, err := mockConn.ReadFrom(buf)
+			if err != nil {
+				return
+			}
+			var resp [nack.ResponseSize]byte
+			nack.EncodeResponse(&nack.Response{
+				MsgType: nack.MsgTypeACK,
+				Flags:   0x01,
+				CurSeq:  200,
+			}, resp[:])
+			_, _ = mockConn.WriteTo(resp[:], src)
+		}
+	}()
+
+	cfg := nack.TrackerConfig{
+		JitterMax:  0,
+		BackoffMax: 1 * time.Second,
+		MaxRetries: 5,
+		GapTTL:     10 * time.Second,
+	}
+	tr := nack.New(cfg, []string{mockConn.LocalAddr().String()}, nil, nil, nil)
+
+	tr.Observe(0, 0, 100, [32]byte{})
+	tr.Observe(0, 200, 300, [32]byte{}) // gap, key=200
+	if tr.PendingGaps() != 1 {
+		t.Fatalf("setup: PendingGaps = %d, want 1", tr.PendingGaps())
+	}
+
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	tr.Start(ctx)
+
+	// Poll for the gap to be cancelled by ACK.
+	got := pollGaps(tr, 0, 3*time.Second)
+	if got != 0 {
+		t.Errorf("after ACK: PendingGaps = %d, want 0", got)
+	}
+}
+
+func TestSendNACK_MISS_AdvancesRetry(t *testing.T) {
+	// Mock endpoint that always responds with MISS.
+	mockConn, err := net.ListenPacket("udp", "[::1]:0")
+	if err != nil {
+		t.Skipf("UDP loopback unavailable: %v", err)
+	}
+	defer func() { _ = mockConn.Close() }()
+
+	go func() {
+		buf := make([]byte, 256)
+		for {
+			_, src, err := mockConn.ReadFrom(buf)
+			if err != nil {
+				return
+			}
+			var resp [nack.ResponseSize]byte
+			nack.EncodeResponse(&nack.Response{
+				MsgType: nack.MsgTypeMISS,
+				CurSeq:  0,
+			}, resp[:])
+			_, _ = mockConn.WriteTo(resp[:], src)
+		}
+	}()
+
+	cfg := nack.TrackerConfig{
+		JitterMax:  0,
+		BackoffMax: 1 * time.Second,
+		MaxRetries: 2,
+		GapTTL:     10 * time.Second,
+	}
+	tr := nack.New(cfg, []string{mockConn.LocalAddr().String()}, nil, nil, nil)
+
+	tr.Observe(0, 0, 100, [32]byte{})
+	tr.Observe(0, 200, 300, [32]byte{}) // gap
+	if tr.PendingGaps() != 1 {
+		t.Fatalf("setup: PendingGaps = %d, want 1", tr.PendingGaps())
+	}
+
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	tr.Start(ctx)
+
+	// With MaxRetries=2 the gap should be evicted after retries are exhausted.
+	got := pollGaps(tr, 0, 5*time.Second)
+	if got != 0 {
+		t.Errorf("after MISS exhaustion: PendingGaps = %d, want 0", got)
+	}
+}
+
+func TestSendNACK_Timeout_BacksOff(t *testing.T) {
+	// Mock endpoint that never responds — sendNACK will hit respTimeout.
+	mockConn, err := net.ListenPacket("udp", "[::1]:0")
+	if err != nil {
+		t.Skipf("UDP loopback unavailable: %v", err)
+	}
+	// Don't read from mockConn — let NACKs timeout.
+	defer func() { _ = mockConn.Close() }()
+
+	cfg := nack.TrackerConfig{
+		JitterMax:  0,
+		BackoffMax: 500 * time.Millisecond,
+		MaxRetries: 2,
+		GapTTL:     10 * time.Second,
+	}
+	tr := nack.New(cfg, []string{mockConn.LocalAddr().String()}, nil, nil, nil)
+
+	tr.Observe(0, 0, 100, [32]byte{})
+	tr.Observe(0, 200, 300, [32]byte{})
+	if tr.PendingGaps() != 1 {
+		t.Fatalf("setup: PendingGaps = %d, want 1", tr.PendingGaps())
+	}
+
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	tr.Start(ctx)
+
+	// Gap survives the first cycle (timeout → backoff) but is eventually
+	// evicted when MaxRetries is exceeded.
+	got := pollGaps(tr, 0, 8*time.Second)
+	if got != 0 {
+		t.Errorf("after timeout exhaustion: PendingGaps = %d, want 0", got)
 	}
 }
