@@ -6,18 +6,24 @@ import (
 	"github.com/lightwebinc/bitcoin-shard-listener/nack"
 )
 
-func TestEncodeDecodeNACK(t *testing.T) {
-	var txid [32]byte
-	txid[0] = 0xAB
+func TestNACKSize(t *testing.T) {
+	if nack.NACKSize != 24 {
+		t.Errorf("NACKSize = %d, want 24", nack.NACKSize)
+	}
+}
 
+func TestResponseSize(t *testing.T) {
+	if nack.ResponseSize != 16 {
+		t.Errorf("ResponseSize = %d, want 16", nack.ResponseSize)
+	}
+}
+
+func TestEncodeDecodeNACK_ByPrevSeq(t *testing.T) {
 	n := &nack.NACK{
 		MsgType:    nack.MsgTypeNACK,
-		TxID:       txid,
-		SenderID:   0xAABBCCDD,
-		SequenceID: 0x11223344,
-		SeqNum:     0xDEADBEEF,
+		LookupType: nack.LookupByPrevSeq,
+		LookupSeq:  0xDEADBEEFCAFEBABE,
 	}
-
 	var buf [nack.NACKSize]byte
 	nack.Encode(n, buf[:])
 
@@ -28,88 +34,66 @@ func TestEncodeDecodeNACK(t *testing.T) {
 	if got.MsgType != nack.MsgTypeNACK {
 		t.Errorf("MsgType = 0x%02X, want 0x%02X", got.MsgType, nack.MsgTypeNACK)
 	}
-	if got.TxID != txid {
-		t.Errorf("TxID mismatch")
+	if got.LookupType != nack.LookupByPrevSeq {
+		t.Errorf("LookupType = 0x%02X, want LookupByPrevSeq", got.LookupType)
 	}
-	if got.SenderID != n.SenderID {
-		t.Errorf("SenderID = %d, want %d", got.SenderID, n.SenderID)
+	if got.LookupSeq != n.LookupSeq {
+		t.Errorf("LookupSeq = 0x%016X, want 0x%016X", got.LookupSeq, n.LookupSeq)
 	}
-	if got.SequenceID != n.SequenceID {
-		t.Errorf("SequenceID = %d, want %d", got.SequenceID, n.SequenceID)
+}
+
+func TestEncodeDecodeNACK_ByCurSeq(t *testing.T) {
+	n := &nack.NACK{
+		MsgType:    nack.MsgTypeNACK,
+		LookupType: nack.LookupByCurSeq,
+		LookupSeq:  0x0102030405060708,
 	}
-	if got.SeqNum != n.SeqNum {
-		t.Errorf("SeqNum = %d, want %d", got.SeqNum, n.SeqNum)
+	var buf [nack.NACKSize]byte
+	nack.Encode(n, buf[:])
+
+	got, err := nack.Decode(buf[:])
+	if err != nil {
+		t.Fatalf("Decode: %v", err)
+	}
+	if got.LookupType != nack.LookupByCurSeq {
+		t.Errorf("LookupType = 0x%02X, want LookupByCurSeq", got.LookupType)
+	}
+	if got.LookupSeq != n.LookupSeq {
+		t.Errorf("LookupSeq mismatch")
+	}
+}
+
+func TestDecodeNACK_ErrShort(t *testing.T) {
+	_, err := nack.Decode(make([]byte, nack.NACKSize-1))
+	if err != nack.ErrBadNACK {
+		t.Errorf("want ErrBadNACK for short buf, got %v", err)
+	}
+}
+
+func TestDecodeNACK_ErrBadMagic(t *testing.T) {
+	buf := make([]byte, nack.NACKSize)
+	buf[0] = 0xFF
+	_, err := nack.Decode(buf)
+	if err != nack.ErrBadNACK {
+		t.Errorf("want ErrBadNACK for bad magic, got %v", err)
+	}
+}
+
+func TestDecodeNACK_ErrBadMsgType(t *testing.T) {
+	var buf [nack.NACKSize]byte
+	nack.Encode(&nack.NACK{MsgType: nack.MsgTypeNACK}, buf[:])
+	buf[6] = 0x99
+	_, err := nack.Decode(buf[:])
+	if err != nack.ErrBadNACK {
+		t.Errorf("want ErrBadNACK for unknown MsgType, got %v", err)
 	}
 }
 
 func TestEncodeDecodeACK(t *testing.T) {
 	r := &nack.Response{
-		MsgType:    nack.MsgTypeACK,
-		Flags:      0x03, // multicast_sent | unicast_sent
-		SenderID:   0xAABBCCDD,
-		SequenceID: 0x11223344,
-		SeqNum:     0xDEADBEEF,
-	}
-	var buf [nack.ResponseSize]byte
-	nack.EncodeResponse(r, buf[:])
-
-	got, err := nack.DecodeResponse(buf[:])
-	if err != nil {
-		t.Fatalf("DecodeResponse: %v", err)
-	}
-	if got.MsgType != nack.MsgTypeACK {
-		t.Errorf("MsgType = 0x%02X, want 0x%02X", got.MsgType, nack.MsgTypeACK)
-	}
-	if got.Flags != 0x03 {
-		t.Errorf("Flags = 0x%02X, want 0x03", got.Flags)
-	}
-	if got.SenderID != r.SenderID {
-		t.Errorf("SenderID = 0x%08X, want 0x%08X", got.SenderID, r.SenderID)
-	}
-	if got.SequenceID != r.SequenceID {
-		t.Errorf("SequenceID = 0x%08X, want 0x%08X", got.SequenceID, r.SequenceID)
-	}
-	if got.SeqNum != r.SeqNum {
-		t.Errorf("SeqNum = 0x%08X, want 0x%08X", got.SeqNum, r.SeqNum)
-	}
-}
-
-func TestDecodeResponse_MISS_24bytes(t *testing.T) {
-	r := &nack.Response{
-		MsgType:    nack.MsgTypeMISS,
-		Flags:      0x00,
-		SenderID:   0x12345678,
-		SequenceID: 0xABCDEF01,
-		SeqNum:     42,
-	}
-	var buf [nack.ResponseSize]byte
-	nack.EncodeResponse(r, buf[:])
-
-	got, err := nack.DecodeResponse(buf[:])
-	if err != nil {
-		t.Fatalf("DecodeResponse: %v", err)
-	}
-	if got.MsgType != nack.MsgTypeMISS {
-		t.Errorf("MsgType = 0x%02X, want 0x%02X", got.MsgType, nack.MsgTypeMISS)
-	}
-	if got.SenderID != r.SenderID {
-		t.Errorf("SenderID mismatch")
-	}
-	if got.SequenceID != r.SequenceID {
-		t.Errorf("SequenceID mismatch")
-	}
-	if got.SeqNum != r.SeqNum {
-		t.Errorf("SeqNum mismatch")
-	}
-}
-
-func TestDecodeResponse_ACK_24bytes(t *testing.T) {
-	r := &nack.Response{
-		MsgType:    nack.MsgTypeACK,
-		Flags:      0x01,
-		SenderID:   999,
-		SequenceID: 888,
-		SeqNum:     777,
+		MsgType: nack.MsgTypeACK,
+		Flags:   0x03, // multicast_sent | unicast_sent
+		CurSeq:  0xAABBCCDDEEFF0011,
 	}
 	var buf [nack.ResponseSize]byte
 	nack.EncodeResponse(r, buf[:])
@@ -121,12 +105,43 @@ func TestDecodeResponse_ACK_24bytes(t *testing.T) {
 	if got.MsgType != nack.MsgTypeACK {
 		t.Errorf("MsgType = 0x%02X, want ACK", got.MsgType)
 	}
-	if got.Flags != 0x01 {
-		t.Errorf("Flags = 0x%02X, want 0x01", got.Flags)
+	if got.Flags != 0x03 {
+		t.Errorf("Flags = 0x%02X, want 0x03", got.Flags)
+	}
+	if got.CurSeq != r.CurSeq {
+		t.Errorf("CurSeq = 0x%016X, want 0x%016X", got.CurSeq, r.CurSeq)
 	}
 }
 
-func TestDecodeResponse_badMagic(t *testing.T) {
+func TestEncodeDecodeMISS(t *testing.T) {
+	r := &nack.Response{
+		MsgType: nack.MsgTypeMISS,
+		Flags:   0x00,
+		CurSeq:  0, // zero for MISS
+	}
+	var buf [nack.ResponseSize]byte
+	nack.EncodeResponse(r, buf[:])
+
+	got, err := nack.DecodeResponse(buf[:])
+	if err != nil {
+		t.Fatalf("DecodeResponse: %v", err)
+	}
+	if got.MsgType != nack.MsgTypeMISS {
+		t.Errorf("MsgType = 0x%02X, want MISS", got.MsgType)
+	}
+	if got.CurSeq != 0 {
+		t.Errorf("CurSeq = %d, want 0 for MISS", got.CurSeq)
+	}
+}
+
+func TestDecodeResponse_ErrShort(t *testing.T) {
+	_, err := nack.DecodeResponse(make([]byte, nack.ResponseSize-1))
+	if err != nack.ErrBadResponse {
+		t.Errorf("want ErrBadResponse for short buf, got %v", err)
+	}
+}
+
+func TestDecodeResponse_ErrBadMagic(t *testing.T) {
 	var buf [nack.ResponseSize]byte
 	nack.EncodeResponse(&nack.Response{MsgType: nack.MsgTypeACK}, buf[:])
 	buf[0] = 0xFF
@@ -136,15 +151,7 @@ func TestDecodeResponse_badMagic(t *testing.T) {
 	}
 }
 
-func TestDecodeResponse_tooShort(t *testing.T) {
-	_, err := nack.DecodeResponse(make([]byte, nack.ResponseSize-1))
-	if err != nack.ErrBadResponse {
-		t.Errorf("want ErrBadResponse for short buf, got %v", err)
-	}
-}
-
 func TestACKFlags_multicast_unicast(t *testing.T) {
-	// Test that multicast_sent (0x01) and unicast_sent (0x02) are independent
 	for _, tc := range []struct {
 		flags byte
 		mc    bool
@@ -168,58 +175,5 @@ func TestACKFlags_multicast_unicast(t *testing.T) {
 			t.Errorf("flags=0x%02X: mc=%v uc=%v, want mc=%v uc=%v",
 				tc.flags, mc, uc, tc.mc, tc.uc)
 		}
-	}
-}
-
-func TestResponseSize_is24(t *testing.T) {
-	if nack.ResponseSize != 24 {
-		t.Errorf("ResponseSize = %d, want 24", nack.ResponseSize)
-	}
-}
-
-func TestDecodeErrShort(t *testing.T) {
-	_, err := nack.Decode(make([]byte, nack.NACKSize-1))
-	if err != nack.ErrBadNACK {
-		t.Errorf("want ErrBadNACK for short buf, got %v", err)
-	}
-}
-
-func TestDecodeErrBadMagic(t *testing.T) {
-	buf := make([]byte, nack.NACKSize)
-	buf[0] = 0xFF
-	_, err := nack.Decode(buf)
-	if err != nack.ErrBadNACK {
-		t.Errorf("want ErrBadNACK for bad magic, got %v", err)
-	}
-}
-
-func TestDecodeErrBadType(t *testing.T) {
-	var buf [nack.NACKSize]byte
-	n := &nack.NACK{MsgType: nack.MsgTypeNACK}
-	nack.Encode(n, buf[:])
-	buf[6] = 0x99
-	_, err := nack.Decode(buf[:])
-	if err != nack.ErrBadNACK {
-		t.Errorf("want ErrBadNACK for unknown MsgType, got %v", err)
-	}
-}
-
-func TestCRC32cSenderID(t *testing.T) {
-	// SenderID is now a CRC32c checksum of the IPv6 address (uint32)
-	var senderID uint32 = 0xDEADBEEF
-
-	n := &nack.NACK{
-		MsgType:    nack.MsgTypeNACK,
-		SenderID:   senderID,
-		SequenceID: 0x99887766,
-	}
-	var buf [nack.NACKSize]byte
-	nack.Encode(n, buf[:])
-	got, err := nack.Decode(buf[:])
-	if err != nil {
-		t.Fatalf("Decode: %v", err)
-	}
-	if got.SenderID != senderID {
-		t.Errorf("SenderID not preserved: got %x, want %x", got.SenderID, senderID)
 	}
 }

@@ -197,19 +197,16 @@ func (w *Worker) processFrame(raw []byte) {
 		}
 	}
 
-	// Gap tracking: BRC-124 only, both SenderID and SeqNum must be non-zero.
-	if w.tracker != nil &&
-		f.Version == frame.FrameVerV2 &&
-		f.SeqNum != 0 &&
-		f.SenderID != 0 {
-		w.tracker.Observe(f.SenderID, groupIdx, f.SeqNum, f.SequenceID, f.TxID)
+	// Gap tracking: BRC-124 only, CurSeq must be non-zero (proxy-stamped).
+	if w.tracker != nil && f.Version == frame.FrameVerV2 && f.CurSeq != 0 {
+		w.tracker.Observe(groupIdx, f.PrevSeq, f.CurSeq, f.TxID)
 	}
 
 	if w.debug {
 		w.log.Debug("frame forwarded",
 			"version", f.Version,
 			"group", groupIdx,
-			"seq", f.SeqNum,
+			"cur_seq", f.CurSeq,
 		)
 	}
 }

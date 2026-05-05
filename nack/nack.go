@@ -20,46 +20,40 @@ type TrackerConfig struct {
 	GapTTL     time.Duration // Max lifetime of a gap entry (~Bitcoin block interval)
 }
 
-// senderGroupKey is the composite state key per (senderID, groupIdx, sequenceID).
-type senderGroupKey struct {
-	senderID   uint32
-	groupIdx   uint32
-	sequenceID uint32
-}
-
-// gapEntry holds retry state for a single missing sequence number.
+// gapEntry holds retry state for a single gap in the hash chain.
+//
+// A gap is the absence of one or more frames between the last successfully
+// received frame (whose CurSeq == prevSeq) and the frame that revealed the
+// gap (whose PrevSeq == curSeq).
 type gapEntry struct {
-	txid        [32]byte
-	seq         uint32
-	senderID    uint32
+	prevSeq     uint64 // CurSeq of last good frame — used for forward NACK (LookupByPrevSeq)
+	curSeq      uint64 // PrevSeq of next received frame — used for backward NACK (LookupByCurSeq)
 	groupIdx    uint32
-	sequenceID  uint32
 	retries     int
 	nextAttempt time.Time
-	deadline    time.Time // absolute eviction deadline (= detectedAt + GapTTL)
-	endpointIdx int       // index into registry snapshot for escalation
+	deadline    time.Time // absolute eviction deadline
+	endpointIdx int       // round-robin index into registry snapshot
 }
 
-// senderState holds per-(senderID, groupIdx) tracking state.
-type senderState struct {
-	highestConsec uint32               // highest consecutive seq without gaps below
-	pending       map[uint32]*gapEntry // missing seqs awaiting NACK or fill
+// groupState holds per-group tracking state.
+type groupState struct {
+	lastCurSeq uint64               // CurSeq of the most recently observed frame
+	pending    map[uint64]*gapEntry // keyed by gapEntry.curSeq
 }
 
 // Tracker is the gap state machine. Construct with [New] and call [Start] to
 // begin background GC and NACK dispatch.
 type Tracker struct {
-	cfg            TrackerConfig
-	retryEndpoints []string // static seed endpoints (fallback)
-	iface          *net.Interface
-	rec            *metrics.Recorder
-	log            *slog.Logger
-	registry       *discovery.Registry
-	respTimeout    time.Duration // deadline for ACK/MISS response (default 300ms)
-	maxConcurrent  int           // semaphore bound for concurrent sendNACK goroutines
+	cfg           TrackerConfig
+	iface         *net.Interface
+	rec           *metrics.Recorder
+	log           *slog.Logger
+	registry      *discovery.Registry
+	respTimeout   time.Duration // deadline for ACK/MISS response (default 300ms)
+	maxConcurrent int           // semaphore bound for concurrent sendNACK goroutines
 
 	mu     sync.Mutex
-	states map[senderGroupKey]*senderState
+	states map[uint32]*groupState // keyed by groupIdx
 
 	// nackQueue receives gap entries ready for NACK dispatch.
 	nackQueue chan *gapEntry
@@ -70,8 +64,7 @@ type Tracker struct {
 
 // New constructs a Tracker. retryEndpoints is the static seed list.
 // registry is the dynamic endpoint registry from beacon discovery (may be nil
-// to use only static seeds). iface is used for potential future multicast
-// NACK send (currently unicast UDP).
+// to use only static seeds). iface is reserved for future multicast NACK send.
 func New(cfg TrackerConfig, retryEndpoints []string, iface *net.Interface, rec *metrics.Recorder, registry *discovery.Registry) *Tracker {
 	const defaultMaxConcurrent = 64
 	const defaultRespTimeout = 300 * time.Millisecond
@@ -79,100 +72,90 @@ func New(cfg TrackerConfig, retryEndpoints []string, iface *net.Interface, rec *
 	if registry == nil {
 		registry = discovery.NewRegistry()
 	}
-	// Seed static endpoints at lowest priority.
 	if len(retryEndpoints) > 0 {
 		registry.Seed(retryEndpoints)
 	}
 
 	return &Tracker{
-		cfg:            cfg,
-		retryEndpoints: retryEndpoints,
-		iface:          iface,
-		rec:            rec,
-		log:            slog.Default().With("component", "nack"),
-		registry:       registry,
-		respTimeout:    defaultRespTimeout,
-		maxConcurrent:  defaultMaxConcurrent,
-		states:         make(map[senderGroupKey]*senderState),
-		nackQueue:      make(chan *gapEntry, 4096),
-		sem:            make(chan struct{}, defaultMaxConcurrent),
+		cfg:           cfg,
+		iface:         iface,
+		rec:           rec,
+		log:           slog.Default().With("component", "nack"),
+		registry:      registry,
+		respTimeout:   defaultRespTimeout,
+		maxConcurrent: defaultMaxConcurrent,
+		states:        make(map[uint32]*groupState),
+		nackQueue:     make(chan *gapEntry, 4096),
+		sem:           make(chan struct{}, defaultMaxConcurrent),
 	}
 }
 
-// Observe is called by the listener worker when a BRC-124 frame with non-zero
-// SenderID and non-zero SeqNum arrives. It detects gaps and schedules NACKs.
-func (t *Tracker) Observe(senderID uint32, groupIdx uint32, seq uint32, sequenceID uint32, txid [32]byte) {
-	if seq == 0 {
-		return
-	}
-	if senderID == 0 {
+// Observe is called by the listener worker on every BRC-124 v2 frame.
+// It detects chain breaks (PrevSeq mismatch) and schedules parallel NACKs.
+// curSeq == 0 means the proxy has not yet stamped the frame; it is ignored.
+func (t *Tracker) Observe(groupIdx uint32, prevSeq, curSeq uint64, txid [32]byte) {
+	if curSeq == 0 {
 		return
 	}
 
 	t.mu.Lock()
 	defer t.mu.Unlock()
 
-	key := senderGroupKey{senderID: senderID, groupIdx: groupIdx, sequenceID: sequenceID}
-	st, ok := t.states[key]
+	st, ok := t.states[groupIdx]
 	if !ok {
-		st = &senderState{
-			highestConsec: seq,
-			pending:       make(map[uint32]*gapEntry),
+		// First frame seen for this group — initialise chain.
+		t.states[groupIdx] = &groupState{
+			lastCurSeq: curSeq,
+			pending:    make(map[uint64]*gapEntry),
 		}
-		t.states[key] = st
 		return
 	}
 
-	// If this seq fills a pending gap, cancel it.
-	if e, found := st.pending[seq]; found {
-		delete(st.pending, seq)
-		_ = e
+	// Fill: if this frame's CurSeq matches a pending gap key, close it.
+	if _, found := st.pending[curSeq]; found {
+		delete(st.pending, curSeq)
 		if t.rec != nil {
 			t.rec.GapSuppressed()
 		}
 	}
 
-	// Advance consecutive high-water mark.
-	if seq == st.highestConsec+1 {
-		st.highestConsec = seq
-	} else if seq > st.highestConsec+1 {
-		// Gap: register all missing seqs between highestConsec+1 and seq-1.
-		now := time.Now()
-		for missing := st.highestConsec + 1; missing < seq; missing++ {
-			if _, already := st.pending[missing]; already {
-				continue
-			}
+	// Gap detection: prevSeq should equal lastCurSeq for a contiguous chain.
+	// prevSeq == 0 signals the start of a new chain from the same group.
+	if prevSeq != 0 && prevSeq != st.lastCurSeq {
+		// One or more frames are missing. The gap is bounded by:
+		//   prevSeq  = CurSeq of last good frame    (forward lookup key)
+		//   curSeq of gap = incoming f.PrevSeq       (backward lookup key)
+		gapKey := prevSeq // key by CurSeq of the last-in-gap frame
+		if _, already := st.pending[gapKey]; !already {
+			now := time.Now()
 			jitter := time.Duration(rand.Int64N(int64(t.cfg.JitterMax) + 1))
 			e := &gapEntry{
-				txid:        txid, // best effort — actual TxID of missing frame unknown
-				seq:         missing,
-				senderID:    senderID,
+				prevSeq:     st.lastCurSeq,
+				curSeq:      prevSeq,
 				groupIdx:    groupIdx,
-				sequenceID:  sequenceID,
 				nextAttempt: now.Add(jitter),
 				deadline:    now.Add(t.cfg.GapTTL),
 			}
-			st.pending[missing] = e
+			st.pending[gapKey] = e
 			if t.rec != nil {
 				t.rec.GapDetected()
 			}
 		}
-		st.highestConsec = seq
 	}
+
+	st.lastCurSeq = curSeq
 }
 
-// Fill is called when a previously-missing frame arrives on the multicast group
-// (repair received). It cancels any pending NACK for that (senderID, groupIdx, sequenceID, seq).
-func (t *Tracker) Fill(senderID uint32, groupIdx uint32, sequenceID uint32, seq uint32) {
-	if seq == 0 {
+// Fill cancels a pending gap when a retransmitted frame arrives via multicast
+// with the given (groupIdx, curSeq).
+func (t *Tracker) Fill(groupIdx uint32, curSeq uint64) {
+	if curSeq == 0 {
 		return
 	}
 	t.mu.Lock()
-	key := senderGroupKey{senderID: senderID, groupIdx: groupIdx, sequenceID: sequenceID}
-	st, ok := t.states[key]
-	if ok {
-		if _, found := st.pending[seq]; found {
-			delete(st.pending, seq)
+	if st, ok := t.states[groupIdx]; ok {
+		if _, found := st.pending[curSeq]; found {
+			delete(st.pending, curSeq)
 			if t.rec != nil {
 				t.rec.GapSuppressed()
 			}
@@ -207,35 +190,32 @@ func (t *Tracker) sweepOnce(now time.Time) {
 	t.mu.Lock()
 	defer t.mu.Unlock()
 
-	for key, st := range t.states {
-		for seq, e := range st.pending {
+	for groupIdx, st := range t.states {
+		for key, e := range st.pending {
 			if now.After(e.deadline) {
-				delete(st.pending, seq)
+				delete(st.pending, key)
 				if t.rec != nil {
 					t.rec.GapUnrecovered()
 				}
 				t.log.Debug("gap evicted (TTL)",
-					"sender", e.senderID,
-					"group", key.groupIdx,
-					"seq", seq,
+					"group", groupIdx,
+					"cur_seq", e.curSeq,
 				)
 				continue
 			}
 			if e.retries >= t.cfg.MaxRetries {
-				delete(st.pending, seq)
+				delete(st.pending, key)
 				if t.rec != nil {
 					t.rec.GapUnrecovered()
 				}
 				t.log.Debug("gap evicted (retries)",
-					"sender", e.senderID,
-					"group", key.groupIdx,
-					"seq", seq,
+					"group", groupIdx,
+					"cur_seq", e.curSeq,
 				)
 				continue
 			}
 			if now.After(e.nextAttempt) {
-				// Make a shallow copy to avoid races.
-				entry := *e
+				entry := *e // shallow copy to avoid races
 				select {
 				case t.nackQueue <- &entry:
 				default:
@@ -244,7 +224,7 @@ func (t *Tracker) sweepOnce(now time.Time) {
 			}
 		}
 		if len(st.pending) == 0 {
-			delete(t.states, key)
+			delete(t.states, groupIdx)
 		}
 	}
 }
@@ -256,7 +236,6 @@ func (t *Tracker) dispatchLoop(ctx context.Context) {
 		case <-ctx.Done():
 			return
 		case e := <-t.nackQueue:
-			// Acquire semaphore slot (bounded concurrency).
 			select {
 			case t.sem <- struct{}{}:
 			case <-ctx.Done():
@@ -270,6 +249,10 @@ func (t *Tracker) dispatchLoop(ctx context.Context) {
 	}
 }
 
+// sendNACK dispatches two NACKs in parallel (forward by PrevSeq, backward by
+// CurSeq) to the same retry endpoint, then waits for the first ACK/MISS
+// response. On ACK the gap is cancelled; on MISS or timeout, retry state
+// advances with exponential backoff.
 func (t *Tracker) sendNACK(e *gapEntry) {
 	snap := t.registry.Snapshot()
 	if len(snap) == 0 {
@@ -279,16 +262,6 @@ func (t *Tracker) sendNACK(e *gapEntry) {
 	idx := e.endpointIdx % len(snap)
 	endpoint := snap[idx]
 
-	var buf [NACKSize]byte
-	n := &NACK{
-		MsgType:    MsgTypeNACK,
-		TxID:       e.txid,
-		SeqNum:     e.seq,
-		SenderID:   e.senderID,
-		SequenceID: e.sequenceID,
-	}
-	Encode(n, buf[:])
-
 	addr, err := net.ResolveUDPAddr("udp", endpoint.Addr)
 	if err != nil {
 		t.log.Warn("NACK: cannot resolve retry endpoint", "endpoint", endpoint.Addr, "err", err)
@@ -296,12 +269,9 @@ func (t *Tracker) sendNACK(e *gapEntry) {
 		return
 	}
 
-	// Ephemeral unconnected UDP socket: send NACK and wait for response.
-	// We intentionally avoid net.DialUDP (connected socket) because a
-	// connected socket filters incoming packets by exact source address.
-	// If the retry endpoint's kernel selects a SLAAC-derived source address
-	// instead of the static address the listener dialled, the ACK response
-	// is silently discarded. An unconnected socket accepts from any source.
+	// Ephemeral unconnected socket: accept ACK/MISS from any source address.
+	// (Connected sockets filter by exact source; SLAAC addresses on the retry
+	// endpoint would cause silent discard of ACK responses.)
 	conn, err := net.ListenPacket("udp", "[::]:0")
 	if err != nil {
 		t.log.Warn("NACK: listen failed", "endpoint", endpoint.Addr, "err", err)
@@ -310,23 +280,33 @@ func (t *Tracker) sendNACK(e *gapEntry) {
 	}
 	defer func() { _ = conn.Close() }()
 
-	_, _ = conn.WriteTo(buf[:], addr)
+	// Forward NACK: find frame whose PrevSeq == e.prevSeq.
+	var fwdBuf [NACKSize]byte
+	Encode(&NACK{MsgType: MsgTypeNACK, LookupType: LookupByPrevSeq, LookupSeq: e.prevSeq}, fwdBuf[:])
+	_, _ = conn.WriteTo(fwdBuf[:], addr)
+
+	// Backward NACK: find frame whose CurSeq == e.curSeq.
+	var bwdBuf [NACKSize]byte
+	Encode(&NACK{MsgType: MsgTypeNACK, LookupType: LookupByCurSeq, LookupSeq: e.curSeq}, bwdBuf[:])
+	_, _ = conn.WriteTo(bwdBuf[:], addr)
+
 	if t.rec != nil {
 		t.rec.NACKDispatched()
 	}
 	t.log.Debug("NACK dispatched",
 		"endpoint", endpoint.Addr,
 		"tier", endpoint.Tier,
-		"seq", e.seq,
+		"prev_seq", e.prevSeq,
+		"cur_seq", e.curSeq,
 		"retry", e.retries+1,
 	)
 
-	// Wait for ACK/MISS response.
+	// Wait for any response (ACK or MISS). Both NACKs share the same socket,
+	// so the first response received determines the action.
 	_ = conn.SetReadDeadline(time.Now().Add(t.respTimeout))
 	var respBuf [ResponseSize + 16]byte
 	nr, _, err := conn.ReadFrom(respBuf[:])
 	if err != nil {
-		// Timeout — apply exponential backoff.
 		t.advanceEndpoint(e, false)
 		return
 	}
@@ -340,36 +320,33 @@ func (t *Tracker) sendNACK(e *gapEntry) {
 
 	switch resp.MsgType {
 	case MsgTypeACK:
-		// Frame found and retransmit dispatched — cancel gap.
 		t.cancelGap(e)
 		t.log.Debug("NACK: ACK received, gap cancelled",
 			"endpoint", endpoint.Addr,
-			"seq", e.seq,
+			"cur_seq", e.curSeq,
 			"flags", resp.Flags,
 		)
 	case MsgTypeMISS:
-		// Cache miss — advance to next endpoint immediately (no backoff).
 		t.log.Debug("NACK: MISS received, advancing endpoint",
 			"endpoint", endpoint.Addr,
-			"seq", e.seq,
+			"cur_seq", e.curSeq,
 		)
 		t.advanceEndpoint(e, true)
 	}
 }
 
 // advanceEndpoint updates retry state after a NACK attempt.
-// If immediate is true (MISS), next attempt is now (no backoff); if false
-// (timeout or error), exponential backoff is applied.
+// immediate=true (MISS): retry now with next endpoint.
+// immediate=false (timeout/error): exponential backoff.
 func (t *Tracker) advanceEndpoint(e *gapEntry, immediate bool) {
 	t.mu.Lock()
 	defer t.mu.Unlock()
 
-	key := senderGroupKey{senderID: e.senderID, groupIdx: e.groupIdx, sequenceID: e.sequenceID}
-	st, ok := t.states[key]
+	st, ok := t.states[e.groupIdx]
 	if !ok {
 		return
 	}
-	entry, ok := st.pending[e.seq]
+	entry, ok := st.pending[e.curSeq]
 	if !ok {
 		return
 	}
@@ -378,10 +355,8 @@ func (t *Tracker) advanceEndpoint(e *gapEntry, immediate bool) {
 	entry.endpointIdx++
 
 	if immediate {
-		// MISS: retry immediately with the next endpoint.
 		entry.nextAttempt = time.Now()
 	} else {
-		// Timeout/error: exponential backoff.
 		backoff := time.Duration(1<<uint(entry.retries)) * 500 * time.Millisecond
 		if backoff > t.cfg.BackoffMax {
 			backoff = t.cfg.BackoffMax
@@ -395,10 +370,9 @@ func (t *Tracker) cancelGap(e *gapEntry) {
 	t.mu.Lock()
 	defer t.mu.Unlock()
 
-	key := senderGroupKey{senderID: e.senderID, groupIdx: e.groupIdx, sequenceID: e.sequenceID}
-	if st, ok := t.states[key]; ok {
-		if _, found := st.pending[e.seq]; found {
-			delete(st.pending, e.seq)
+	if st, ok := t.states[e.groupIdx]; ok {
+		if _, found := st.pending[e.curSeq]; found {
+			delete(st.pending, e.curSeq)
 			if t.rec != nil {
 				t.rec.GapSuppressed()
 			}
