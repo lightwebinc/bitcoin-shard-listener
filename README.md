@@ -5,7 +5,7 @@ Receives BRC-124 frames from the `bitcoin-shard-proxy` multicast fabric, applies
 shard and subtree filters, forwards matching frames to a configurable downstream
 consumer over unicast UDP/TCP and/or multicast egress (domain bridging), and
 performs NORM-inspired NACK-based gap recovery via PrevSeq/CurSeq hash-chain
-tracking with BRC-TBD-retransmission beacon-discovered retry endpoints and
+tracking with BRC-126 beacon-discovered retry endpoints and
 tier-based escalation.
 
 ## Features
@@ -15,7 +15,7 @@ tier-based escalation.
 - **Subtree filter** — include/exclude by 32-byte SubtreeID (BRC-124 frames)
 - **Gap tracking** — per-group PrevSeq/CurSeq hash-chain gap detection (BRC-124)
 - **NACK dispatch** — 24-byte NACK datagrams (LookupType + LookupSeq) with 16-byte ACK/MISS response handling
-- **Beacon discovery** — dynamic retry endpoint registry via BRC-TBD-retransmission ADVERT beacons
+- **Beacon discovery** — dynamic retry endpoint registry via BRC-126 ADVERT beacons
 - **Tier escalation** — MISS → immediate advance to next endpoint; ACK → gap cancelled
 - **Semaphore-bounded dispatch** — concurrent NACK goroutines with configurable limit
 - **Egress UDP or TCP** with optional strip-header mode (payload-only)
@@ -73,7 +73,7 @@ make test-e2e
 - [Architecture](docs/architecture.md)
 - [Configuration reference](docs/configuration.md)
 - [Protocol specification](https://github.com/lightwebinc/bitcoin-shard-common/blob/main/docs/protocol.md)
-- [BRC-TBD-retransmission (Retransmission Protocol)](https://github.com/lightwebinc/bitcoin-multicast/blob/main/docs/brc-tbd-retransmission-protocol.md)
+- [BRC-126 (Retransmission Protocol)](https://github.com/lightwebinc/bitcoin-multicast/blob/main/docs/brc-tbd-retransmission-protocol.md)
 - [NACK Retransmission Flow](https://github.com/lightwebinc/bitcoin-multicast/blob/main/docs/nack-retransmission-flow.md)
 
 ## Dependencies
