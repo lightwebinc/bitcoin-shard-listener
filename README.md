@@ -73,7 +73,7 @@ make test-e2e
 - [Architecture](docs/architecture.md)
 - [Configuration reference](docs/configuration.md)
 - [Protocol specification](https://github.com/lightwebinc/bitcoin-shard-common/blob/main/docs/protocol.md)
-- [BRC-126 (Retransmission Protocol)](https://github.com/lightwebinc/bitcoin-multicast/blob/main/docs/brc-tbd-retransmission-protocol.md)
+- [BRC-126 (Retransmission Protocol)](https://github.com/lightwebinc/bitcoin-multicast/blob/main/docs/brc-126-retransmission-protocol.md)
 - [NACK Retransmission Flow](https://github.com/lightwebinc/bitcoin-multicast/blob/main/docs/nack-retransmission-flow.md)
 
 ## Dependencies
