@@ -148,12 +148,178 @@ func TestObserveOutOfOrder_LastCurSeqNotRegressed(t *testing.T) {
 	tr := newTestTracker()
 	tr.Observe(0, 0, 100, [32]byte{})
 	tr.Observe(0, 100, 200, [32]byte{})
-	// Old out-of-order duplicate arrives — must not regress lastCurSeq to 50.
+	// A frame from an unrecognised predecessor (prevSeq=20) arrives — in the
+	// multi-chain design this creates an orphan gap at key=20 (a second chain
+	// may genuinely start here). The main chain is unaffected.
 	tr.Observe(0, 20, 50, [32]byte{})
-	// A subsequent in-order frame (prevSeq=200) must NOT detect a gap.
+	// A subsequent in-order frame for the MAIN chain must NOT create a gap.
+	tr.Observe(0, 200, 300, [32]byte{})
+	// PendingGaps == 1: the orphan gap at key=20 (will expire via GapTTL).
+	// The main chain (0→100→200→300) has no gaps.
+	if g := tr.PendingGaps(); g != 1 {
+		t.Errorf("after orphan + in-order: PendingGaps = %d, want 1 (orphan gap at key=20)", g)
+	}
+}
+
+// ── Multi-chain / multi-sender tests ─────────────────────────────────────────
+
+func TestObserveMultiSender_NoFalseGap(t *testing.T) {
+	tr := newTestTracker()
+	// Sender A: chain starting at curSeq=1000.
+	tr.Observe(0, 0, 1000, [32]byte{})
+	// Sender B: independent chain starting at curSeq=2000.
+	tr.Observe(0, 0, 2000, [32]byte{})
+	// Sender A continues.
+	tr.Observe(0, 1000, 1100, [32]byte{})
+	// Sender B continues — must NOT create a gap against A's tail.
+	tr.Observe(0, 2000, 2100, [32]byte{})
+	if g := tr.PendingGaps(); g != 0 {
+		t.Errorf("multi-sender interleaving: PendingGaps = %d, want 0", g)
+	}
+}
+
+func TestObserveMultiSender_GapInOneChain_OtherUnaffected(t *testing.T) {
+	tr := newTestTracker()
+	// Chain A: 0→100→200.
+	tr.Observe(0, 0, 100, [32]byte{})
+	tr.Observe(0, 100, 200, [32]byte{})
+	// Chain B: 0→500 (independent start).
+	tr.Observe(0, 0, 500, [32]byte{})
+	// Gap in chain A: frame with curSeq=300 is missing; chain A jumps to 400.
+	tr.Observe(0, 300, 400, [32]byte{}) // gap key=300
+	// Chain B continues cleanly.
+	tr.Observe(0, 500, 600, [32]byte{})
+	if g := tr.PendingGaps(); g != 1 {
+		t.Errorf("gap in one chain: PendingGaps = %d, want 1", g)
+	}
+}
+
+func TestObserveChainStart_RegistersTail(t *testing.T) {
+	tr := newTestTracker()
+	// Two chains start in the same group.
+	tr.Observe(0, 0, 100, [32]byte{})
+	tr.Observe(0, 0, 200, [32]byte{})
+	// Both continue without gaps.
+	tr.Observe(0, 100, 150, [32]byte{})
+	tr.Observe(0, 200, 250, [32]byte{})
+	if g := tr.PendingGaps(); g != 0 {
+		t.Errorf("two chain starts: PendingGaps = %d, want 0", g)
+	}
+}
+
+func TestObserveDuplicate_Suppressed(t *testing.T) {
+	tr := newTestTracker()
+	tr.Observe(0, 0, 100, [32]byte{})
+	tr.Observe(0, 100, 200, [32]byte{})
+	// Exact duplicate of the last frame.
+	tr.Observe(0, 100, 200, [32]byte{})
 	tr.Observe(0, 200, 300, [32]byte{})
 	if g := tr.PendingGaps(); g != 0 {
-		t.Errorf("after retransmit + in-order: PendingGaps = %d, want 0", g)
+		t.Errorf("duplicate frame: PendingGaps = %d, want 0", g)
+	}
+}
+
+func TestObserveGap_LeftBoundarySet_SingleSender(t *testing.T) {
+	tr := newTestTracker()
+	// Single sender: when a gap is detected, leftBoundary should equal the
+	// tail's lastCurSeq (= last good frame's CurSeq).
+	tr.Observe(0, 0, 100, [32]byte{})
+	tr.Observe(0, 100, 200, [32]byte{}) // tail at 200
+	tr.Observe(0, 300, 400, [32]byte{}) // gap key=300; single tail → leftBoundary=200
+	// Gap should exist; test via GapLeftBoundary accessor.
+	if g := tr.PendingGaps(); g != 1 {
+		t.Fatalf("setup: PendingGaps = %d, want 1", g)
+	}
+	lb := tr.GapLeftBoundary(0, 300)
+	if lb != 200 {
+		t.Errorf("leftBoundary = %d, want 200", lb)
+	}
+}
+
+func TestObserveGap_LeftBoundaryZero_MultiSender(t *testing.T) {
+	tr := newTestTracker()
+	// Two tails in group → leftBoundary must be 0 (ambiguous chain).
+	tr.Observe(0, 0, 100, [32]byte{})   // chain A tail
+	tr.Observe(0, 0, 500, [32]byte{})   // chain B tail
+	tr.Observe(0, 300, 400, [32]byte{}) // gap key=300; two tails → leftBoundary=0
+	if g := tr.PendingGaps(); g != 1 {
+		t.Fatalf("setup: PendingGaps = %d, want 1", g)
+	}
+	lb := tr.GapLeftBoundary(0, 300)
+	if lb != 0 {
+		t.Errorf("leftBoundary = %d, want 0 (multi-sender, ambiguous)", lb)
+	}
+}
+
+func TestObserveChainReconnect_OrphanMerged(t *testing.T) {
+	tr := newTestTracker()
+	// Chain A: 0→100. Then gap at curSeq=200 (frame arriving with prevSeq=200).
+	tr.Observe(0, 0, 100, [32]byte{})
+	tr.Observe(0, 200, 300, [32]byte{}) // gap key=200; orphan tail at 300
+	if g := tr.PendingGaps(); g != 1 {
+		t.Fatalf("setup: PendingGaps = %d, want 1", g)
+	}
+	// Retransmit of the missing frame: prev=100, cur=200.
+	// This fills the gap AND extends chain A → cascadeMerge should attribute orphan.
+	tr.Observe(0, 100, 200, [32]byte{})
+	if g := tr.PendingGaps(); g != 0 {
+		t.Errorf("after retransmit: PendingGaps = %d, want 0", g)
+	}
+	// Chain A should now extend through 300 without gap.
+	tr.Observe(0, 300, 400, [32]byte{})
+	if g := tr.PendingGaps(); g != 0 {
+		t.Errorf("after continuation: PendingGaps = %d, want 0", g)
+	}
+}
+
+func TestObserveBurstGap_CascadeMerge(t *testing.T) {
+	tr := newTestTracker()
+	// Chain A: 0→100. Burst: frames 200 and 300 missing. Frame 400 arrives.
+	tr.Observe(0, 0, 100, [32]byte{})
+	tr.Observe(0, 300, 400, [32]byte{}) // gap key=300; orphan at 400
+	if g := tr.PendingGaps(); g != 1 {
+		t.Fatalf("after first gap: PendingGaps = %d, want 1", g)
+	}
+	// Retransmit of frame 300 (prev=200, cur=300):
+	// Fills gap-300, but creates gap-200 (prev=200 still not in tails).
+	tr.Observe(0, 200, 300, [32]byte{})
+	if g := tr.PendingGaps(); g != 1 {
+		t.Fatalf("after retx-300: PendingGaps = %d, want 1 (gap-200 opened)", g)
+	}
+	// Retransmit of frame 200 (prev=100, cur=200):
+	// Fills gap-200, extends chain A to 200, cascade merges orphans at 300 and 400.
+	tr.Observe(0, 100, 200, [32]byte{})
+	if g := tr.PendingGaps(); g != 0 {
+		t.Errorf("after retx-200: PendingGaps = %d, want 0", g)
+	}
+	// Chain continues cleanly.
+	tr.Observe(0, 400, 500, [32]byte{})
+	if g := tr.PendingGaps(); g != 0 {
+		t.Errorf("after continuation: PendingGaps = %d, want 0", g)
+	}
+}
+
+func TestSweepOnce_StaleTailEvicted(t *testing.T) {
+	cfg := nack.TrackerConfig{
+		JitterMax:  0,
+		BackoffMax: 5 * time.Second,
+		MaxRetries: 3,
+		GapTTL:     10 * time.Second,
+		TailTTL:    50 * time.Millisecond, // very short for testing
+	}
+	tr := nack.New(cfg, nil, nil, nil, nil)
+	// Register a tail.
+	tr.Observe(0, 0, 100, [32]byte{})
+	if tr.ActiveTails() == 0 {
+		t.Fatal("tail should be registered")
+	}
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	tr.Start(ctx)
+	// Wait for TailTTL + sweep interval to pass.
+	time.Sleep(300 * time.Millisecond)
+	if n := tr.ActiveTails(); n != 0 {
+		t.Errorf("stale tail: ActiveTails = %d, want 0", n)
 	}
 }
 

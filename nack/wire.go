@@ -11,7 +11,7 @@
 //	     6     1  MsgType = 0x10 (NACK)
 //	     7     1  LookupType: 0x00 = by PrevSeq, 0x01 = by CurSeq
 //	     8     8  LookupSeq (uint64 BE) — hash value to look up
-//	    16     8  Reserved (must be 0x0000000000000000)
+//	    16     8  ChainID (uint64 BE) — initial CurSeq of the chain; 0 = gap not yet chain-attributed
 //
 // LookupType 0x00 (by PrevSeq): the retry endpoint searches its secondary
 // index for a frame whose PrevSeq == LookupSeq, returning the frame that
@@ -84,6 +84,7 @@ type NACK struct {
 	MsgType    byte   // MsgTypeNACK
 	LookupType byte   // LookupByPrevSeq or LookupByCurSeq
 	LookupSeq  uint64 // XXH64 value to look up
+	ChainID    uint64 // initial CurSeq of the chain; 0 = gap not yet attributed to a chain
 }
 
 // Encode serialises n into buf (must be at least [NACKSize] bytes).
@@ -94,7 +95,7 @@ func Encode(n *NACK, buf []byte) {
 	buf[6] = n.MsgType
 	buf[7] = n.LookupType
 	binary.BigEndian.PutUint64(buf[8:16], n.LookupSeq)
-	binary.BigEndian.PutUint64(buf[16:24], 0) // reserved
+	binary.BigEndian.PutUint64(buf[16:24], n.ChainID)
 }
 
 // Decode parses a NACK datagram from buf.
@@ -115,6 +116,7 @@ func Decode(buf []byte) (*NACK, error) {
 		MsgType:    mt,
 		LookupType: buf[7],
 		LookupSeq:  binary.BigEndian.Uint64(buf[8:16]),
+		ChainID:    binary.BigEndian.Uint64(buf[16:24]),
 	}, nil
 }
 
