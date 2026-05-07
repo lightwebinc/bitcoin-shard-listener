@@ -146,12 +146,13 @@ func TestRegistry_SnapshotSorting(t *testing.T) {
 	r.Upsert(makeAdvert(1, 150, 4))
 	r.Seed([]string{"seed:9300"})
 
+	// Seeds suppressed because beacon entries are present.
 	snap := r.Snapshot()
-	if len(snap) != 5 {
-		t.Fatalf("Snapshot len = %d, want 5", len(snap))
+	if len(snap) != 4 {
+		t.Fatalf("Snapshot len = %d, want 4 (seed suppressed by beacon entries)", len(snap))
 	}
 
-	// Expected order: Tier 0 Pref 200, Tier 0 Pref 100, Tier 1 Pref 150, Tier 2 Pref 50, Tier 0xFF Pref 0
+	// Expected order: Tier 0 Pref 200, Tier 0 Pref 100, Tier 1 Pref 150, Tier 2 Pref 50
 	expected := []struct {
 		tier uint8
 		pref uint8
@@ -160,7 +161,6 @@ func TestRegistry_SnapshotSorting(t *testing.T) {
 		{0, 100},
 		{1, 150},
 		{2, 50},
-		{0xFF, 0},
 	}
 	for i, want := range expected {
 		if snap[i].Tier != want.tier || snap[i].Preference != want.pref {
@@ -170,20 +170,33 @@ func TestRegistry_SnapshotSorting(t *testing.T) {
 	}
 }
 
-func TestRegistry_BeaconBeforeSeed(t *testing.T) {
-	// Beacon-discovered endpoints should appear before seeded ones
+func TestRegistry_BeaconSuppressesSeed(t *testing.T) {
+	// Seeds are suppressed once any beacon entry is present.
 	r := NewRegistry()
 	r.Seed([]string{"seed:9300"})
 	r.Upsert(makeAdvert(0, 128, 1))
 
 	snap := r.Snapshot()
-	if len(snap) != 2 {
-		t.Fatalf("Snapshot len = %d, want 2", len(snap))
+	if len(snap) != 1 {
+		t.Fatalf("Snapshot len = %d, want 1 (seed suppressed)", len(snap))
 	}
 	if snap[0].Tier != 0 {
-		t.Errorf("beacon endpoint should be first, got tier=%d", snap[0].Tier)
+		t.Errorf("beacon endpoint should be returned, got tier=%d", snap[0].Tier)
 	}
-	if snap[1].Tier != 0xFF {
-		t.Errorf("seed should be last, got tier=%d", snap[1].Tier)
+}
+
+func TestRegistry_SeedFallbackOnly(t *testing.T) {
+	// Seeds ARE returned when no beacon entries exist.
+	r := NewRegistry()
+	r.Seed([]string{"seed1:9300", "seed2:9300"})
+
+	snap := r.Snapshot()
+	if len(snap) != 2 {
+		t.Fatalf("Snapshot len = %d, want 2 (seed fallback active)", len(snap))
+	}
+	for _, e := range snap {
+		if e.Tier != 0xFF {
+			t.Errorf("seed Tier = %d, want 0xFF", e.Tier)
+		}
 	}
 }

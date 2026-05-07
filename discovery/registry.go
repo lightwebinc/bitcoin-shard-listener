@@ -109,12 +109,16 @@ func (r *Registry) Snapshot() []*EndpointEntry {
 	defer r.mu.Unlock()
 
 	if r.dirty || r.snapshot == nil {
-		// Rebuild: merge beacon entries + seeds
+		// Rebuild: merge beacon entries + seeds.
+		// Seeds are fallback-only: suppress them when any live beacon entry exists
+		// so they don't expand the round-robin pool and dilute tier-based ordering.
 		merged := make([]*EndpointEntry, 0, len(r.entries)+len(r.seeds))
 		for _, e := range r.entries {
 			merged = append(merged, e)
 		}
-		merged = append(merged, r.seeds...)
+		if len(r.entries) == 0 {
+			merged = append(merged, r.seeds...)
+		}
 
 		sort.Slice(merged, func(i, j int) bool {
 			if merged[i].Tier != merged[j].Tier {
