@@ -13,6 +13,7 @@ tier-based escalation.
 - **SO_REUSEPORT** multi-worker receive with kernel-level source affinity
 - **Shard filter** — subscribe to a subset of shard groups (empty = all)
 - **Subtree filter** — include/exclude by 32-byte SubtreeID (BRC-124 frames)
+- **BRC-127 subtree group announcements** — dynamic group-based filtering via multicast SubtreeAnnounce datagrams with TTL eviction and sender ACLs
 - **Gap tracking** — per-group PrevSeq/CurSeq hash-chain gap detection (BRC-124)
 - **NACK dispatch** — 24-byte NACK datagrams (LookupType + LookupSeq) with 16-byte ACK/MISS response handling
 - **Beacon discovery** — dynamic retry endpoint registry via BRC-126 ADVERT beacons
@@ -78,7 +79,7 @@ make test-e2e
 
 ## Dependencies
 
-- [`github.com/lightwebinc/bitcoin-shard-common`](https://github.com/lightwebinc/bitcoin-shard-common) — `frame`, `shard`, `sequence` packages
+- [`github.com/lightwebinc/bitcoin-shard-common`](https://github.com/lightwebinc/bitcoin-shard-common) — `frame`, `shard` packages
 - Prometheus client + OpenTelemetry SDK (same versions as proxy)
 - `golang.org/x/net/ipv6` — multicast group join
 - `golang.org/x/sys/unix` — `SO_REUSEPORT`

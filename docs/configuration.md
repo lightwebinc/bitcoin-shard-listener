@@ -228,6 +228,54 @@ used by the retry endpoints.
 
 ---
 
+## Subtree Group Announcements (BRC-127)
+
+When configured, the listener joins the `CtrlGroupSubtreeAnnounce`
+(`0xFFFFFC`) control-plane multicast group and receives `SubtreeAnnounce`
+datagrams from block assemblers (via the proxy TCP ingress). Announced
+SubtreeIDs are added to a dynamic registry with TTL-based eviction. The
+filter treats registry membership as an additional pass condition alongside
+static `-subtree-include`.
+
+### `-subtree-groups` / `SUBTREE_GROUPS`
+
+Comma-separated 32-char hex GroupIDs to subscribe to. Each GroupID
+identifies a logical subtree group whose membership is announced
+dynamically. Empty (the default) disables BRC-127 group filtering entirely.
+
+Example: `bfbfbfbfbfbfbfbfbfbfbfbfbfbfbfbf`
+
+### `-subtree-group-default-ttl` / `SUBTREE_GROUP_DEFAULT_TTL` (default: `900s`)
+
+Default TTL applied to group announcements when the sender transmits
+`TTL=0`. After this duration without a refresh, the SubtreeID is evicted
+from the registry and will no longer pass the filter.
+
+### `-announce-scope` / `ANNOUNCE_SCOPE` (default: `site`)
+
+Multicast scope(s) for the announcement group join. Comma-separated if
+joining multiple scopes. Must match the scope used by the proxy's
+multicast egress for the control-plane group.
+
+| Value | Prefix | Reach |
+|--------|--------|---------------------------------------------------|
+| `link` | `FF02` | Same L2 segment only |
+| `site` | `FF05` | Site-local; crosses routers within a site |
+| `org` | `FF08` | Organisation-wide |
+| `global` | `FF0E` | Internet-wide |
+
+### `-sender-include` / `SENDER_INCLUDE`
+
+Comma-separated IPv6 addresses or CIDRs of trusted announcement senders.
+Empty means accept all senders not matched by `-sender-exclude`.
+
+### `-sender-exclude` / `SENDER_EXCLUDE`
+
+Comma-separated IPv6 addresses or CIDRs to reject. Checked before
+`-sender-include`. Empty means exclude nothing.
+
+---
+
 ## Runtime
 
 ### `-workers` / `NUM_WORKERS` (default: `runtime.NumCPU()`)
