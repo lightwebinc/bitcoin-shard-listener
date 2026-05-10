@@ -3,29 +3,37 @@
 //
 // A frame passes the filter if and only if:
 //  1. Its group index is in the shard-include set (or the set is empty = all).
-//  2. Its SubtreeID is in the subtree-include set (or the set is empty = all).
-//  3. Its SubtreeID is NOT in the subtree-exclude set.
+//  2. Its SubtreeID is NOT in the subtree-exclude set.
+//  3. Its SubtreeID is in the subtree-include set OR in any subscribed subtree
+//     group (via groupReg), OR both sets are empty (accept all).
 //
-// V1 frames have a zero SubtreeID. If subtree-include is non-empty a V1 frame
-// will pass only if [32]byte{} is in the include set.
+// V1 frames have a zero SubtreeID. If subtree-include is non-empty and no
+// group registry is set, a V1 frame will pass only if [32]byte{} is in the
+// include set.
 package filter
 
 import (
 	"github.com/lightwebinc/bitcoin-shard-common/frame"
+	"github.com/lightwebinc/bitcoin-shard-listener/subtreegroup"
 )
 
 // Filter holds the compiled include/exclude sets. Construct with [New].
 type Filter struct {
-	shardInclude   map[uint32]struct{}  // nil = all shards accepted
-	subtreeInclude map[[32]byte]struct{} // nil = all subtrees accepted
-	subtreeExclude map[[32]byte]struct{} // nil = no subtrees excluded
+	shardInclude   map[uint32]struct{}    // nil = all shards accepted
+	subtreeInclude map[[32]byte]struct{}  // nil = no static include
+	subtreeExclude map[[32]byte]struct{}  // nil = no subtrees excluded
+	groupReg       *subtreegroup.Registry // nil = group filtering disabled
 }
 
 // New constructs a Filter from the parsed config lists.
 //   - shardInclude: nil or empty means accept all shard indices.
-//   - subtreeInclude: nil or empty means accept all subtree IDs.
+//   - subtreeInclude: nil or empty means no static subtree allowlist.
 //   - subtreeExclude: nil or empty means exclude nothing.
-func New(shardInclude []uint32, subtreeInclude, subtreeExclude [][32]byte) *Filter {
+//   - groupReg: nil disables dynamic subtree-group filtering.
+//
+// When both subtreeInclude and groupReg are nil/empty, all non-excluded
+// subtrees are accepted (open mode).
+func New(shardInclude []uint32, subtreeInclude, subtreeExclude [][32]byte, groupReg *subtreegroup.Registry) *Filter {
 	f := &Filter{}
 	if len(shardInclude) > 0 {
 		f.shardInclude = make(map[uint32]struct{}, len(shardInclude))
@@ -45,6 +53,7 @@ func New(shardInclude []uint32, subtreeInclude, subtreeExclude [][32]byte) *Filt
 			f.subtreeExclude[id] = struct{}{}
 		}
 	}
+	f.groupReg = groupReg
 	return f
 }
 
@@ -63,8 +72,12 @@ func (f *Filter) Allow(groupIdx uint32, fr *frame.Frame) (bool, string) {
 			return false, "subtree_exclude"
 		}
 	}
-	if f.subtreeInclude != nil {
-		if _, ok := f.subtreeInclude[fr.SubtreeID]; !ok {
+	// Accept if: static include matches, OR group registry matches, OR both are
+	// nil/empty (open mode).
+	if f.subtreeInclude != nil || f.groupReg != nil {
+		_, inStatic := f.subtreeInclude[fr.SubtreeID]
+		inGroup := f.groupReg != nil && f.groupReg.Contains(fr.SubtreeID)
+		if !inStatic && !inGroup {
 			return false, "subtree_include_miss"
 		}
 	}

@@ -31,6 +31,11 @@
 //	-beacon-enabled       BEACON_ENABLED       true             Enable ADVERT beacon listener
 //	-beacon-port          BEACON_PORT          9300             UDP port for beacon reception
 //	-beacon-scope         BEACON_SCOPE         site             Multicast scope for beacon groups
+//	-subtree-groups       SUBTREE_GROUPS                        Comma-separated 32-char hex GroupIDs to subscribe
+//	-subtree-group-default-ttl SUBTREE_GROUP_DEFAULT_TTL 900s  Default TTL for group announcements
+//	-announce-scope       ANNOUNCE_SCOPE       site             Multicast scope(s) for announcement group joins
+//	-sender-include       SENDER_INCLUDE                        IPv6 addresses/CIDRs of trusted announcement senders
+//	-sender-exclude       SENDER_EXCLUDE                        IPv6 addresses/CIDRs to reject (checked before include)
 //	-workers              NUM_WORKERS          NumCPU           Receive goroutine count
 //	-debug                DEBUG                false            Per-frame logging
 //	-metrics-addr         METRICS_ADDR         :9200            Prometheus / healthz / readyz
@@ -51,6 +56,10 @@ import (
 	"strings"
 	"time"
 )
+
+// DefaultSubtreeGroupTTL is the default announcement TTL applied when the
+// sender transmits TTL=0 and no -subtree-group-default-ttl is configured.
+const DefaultSubtreeGroupTTL = 900 * time.Second
 
 // Scopes maps human-readable scope names to their RFC 4291 IPv6 multicast prefixes.
 var Scopes = map[string]uint16{
@@ -101,6 +110,13 @@ type Config struct {
 	BeaconEnabled bool
 	BeaconPort    int
 	BeaconScope   string // multicast scope for beacon group joins
+
+	// Subtree group announcements (BRC-127)
+	SubtreeGroups          [][16]byte // parsed GroupIDs to subscribe
+	SubtreeGroupDefaultTTL time.Duration
+	AnnounceScopes         []string     // e.g. ["site", "org"]
+	SenderInclude          []*net.IPNet // nil/empty = accept all non-excluded
+	SenderExclude          []*net.IPNet // checked before include
 
 	// Runtime
 	NumWorkers   int
@@ -167,6 +183,17 @@ func Load() (*Config, error) {
 		"UDP port for receiving ADVERT beacons")
 	flag.StringVar(&c.BeaconScope, "beacon-scope", envStr("BEACON_SCOPE", "site"),
 		"multicast scope for beacon group joins: link | site | org | global")
+	subtreeGroupsFlag := flag.String("subtree-groups", envStr("SUBTREE_GROUPS", ""),
+		"comma-separated 32-char hex group IDs to subscribe (BRC-127)")
+	flag.DurationVar(&c.SubtreeGroupDefaultTTL, "subtree-group-default-ttl",
+		envDuration("SUBTREE_GROUP_DEFAULT_TTL", DefaultSubtreeGroupTTL),
+		"default TTL applied when an announcement carries TTL=0")
+	announceScopeFlag := flag.String("announce-scope", envStr("ANNOUNCE_SCOPE", "site"),
+		"multicast scope(s) for subtree announcement group joins: link | site | org | global (comma-separated)")
+	senderIncludeFlag := flag.String("sender-include", envStr("SENDER_INCLUDE", ""),
+		"comma-separated IPv6 addresses/CIDRs of trusted announcement senders (empty = accept all)")
+	senderExcludeFlag := flag.String("sender-exclude", envStr("SENDER_EXCLUDE", ""),
+		"comma-separated IPv6 addresses/CIDRs to reject (checked before include)")
 	flag.IntVar(&c.NumWorkers, "workers", envInt("NUM_WORKERS", runtime.NumCPU()),
 		"number of worker goroutines (0 = runtime.NumCPU)")
 	flag.BoolVar(&c.Debug, "debug", envBool("DEBUG", false),
@@ -308,6 +335,33 @@ func Load() (*Config, error) {
 		return nil, fmt.Errorf("subtree-exclude: %w", err)
 	}
 
+	// Parse subtree group IDs (32-char hex = 16 bytes each).
+	if c.SubtreeGroups, err = parseGroupList(*subtreeGroupsFlag); err != nil {
+		return nil, fmt.Errorf("subtree-groups: %w", err)
+	}
+
+	// Parse announce scope(s).
+	for _, s := range splitComma(*announceScopeFlag) {
+		if s == "" {
+			continue
+		}
+		if _, ok := Scopes[s]; !ok {
+			return nil, fmt.Errorf("announce-scope %q unknown; valid values: link, site, org, global", s)
+		}
+		c.AnnounceScopes = append(c.AnnounceScopes, s)
+	}
+	if len(c.AnnounceScopes) == 0 {
+		c.AnnounceScopes = []string{"site"}
+	}
+
+	// Parse sender include/exclude CIDRs.
+	if c.SenderInclude, err = parseIPNetList(*senderIncludeFlag); err != nil {
+		return nil, fmt.Errorf("sender-include: %w", err)
+	}
+	if c.SenderExclude, err = parseIPNetList(*senderExcludeFlag); err != nil {
+		return nil, fmt.Errorf("sender-exclude: %w", err)
+	}
+
 	return c, nil
 }
 
@@ -324,6 +378,52 @@ func parseSubtreeList(s string) ([][32]byte, error) {
 		var id [32]byte
 		copy(id[:], b)
 		out = append(out, id)
+	}
+	return out, nil
+}
+
+func parseGroupList(s string) ([][16]byte, error) {
+	var out [][16]byte
+	for _, h := range splitComma(s) {
+		if h == "" {
+			continue
+		}
+		b, err := hex.DecodeString(strings.TrimPrefix(h, "0x"))
+		if err != nil || len(b) != 16 {
+			return nil, fmt.Errorf("invalid 32-char hex group ID %q (want 16 bytes)", h)
+		}
+		var id [16]byte
+		copy(id[:], b)
+		out = append(out, id)
+	}
+	return out, nil
+}
+
+func parseIPNetList(s string) ([]*net.IPNet, error) {
+	var out []*net.IPNet
+	for _, addr := range splitComma(s) {
+		if addr == "" {
+			continue
+		}
+		var ipNet *net.IPNet
+		var err error
+		if strings.Contains(addr, "/") {
+			_, ipNet, err = net.ParseCIDR(addr)
+			if err != nil {
+				return nil, fmt.Errorf("invalid CIDR %q: %w", addr, err)
+			}
+		} else {
+			ip := net.ParseIP(addr)
+			if ip == nil {
+				return nil, fmt.Errorf("invalid IP address %q", addr)
+			}
+			bits := 128
+			if ip.To4() != nil {
+				bits = 32
+			}
+			ipNet = &net.IPNet{IP: ip, Mask: net.CIDRMask(bits, bits)}
+		}
+		out = append(out, ipNet)
 	}
 	return out, nil
 }

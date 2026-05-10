@@ -24,6 +24,7 @@ import (
 	"github.com/lightwebinc/bitcoin-shard-listener/listener"
 	"github.com/lightwebinc/bitcoin-shard-listener/metrics"
 	"github.com/lightwebinc/bitcoin-shard-listener/nack"
+	"github.com/lightwebinc/bitcoin-shard-listener/subtreegroup"
 )
 
 func main() {
@@ -80,8 +81,18 @@ func run() error {
 	}
 	slog.Info("multicast groups", "count", len(groups))
 
+	// Build subtree group registry if -subtree-groups is configured.
+	var groupReg *subtreegroup.Registry
+	if len(cfg.SubtreeGroups) > 0 {
+		groupReg = subtreegroup.New(cfg.SubtreeGroups, cfg.SubtreeGroupDefaultTTL)
+		slog.Info("subtree group registry created",
+			"groups", len(cfg.SubtreeGroups),
+			"default_ttl", cfg.SubtreeGroupDefaultTTL,
+		)
+	}
+
 	// Build filter.
-	filt := filter.New(cfg.ShardInclude, cfg.SubtreeInclude, cfg.SubtreeExclude)
+	filt := filter.New(cfg.ShardInclude, cfg.SubtreeInclude, cfg.SubtreeExclude, groupReg)
 
 	// Build the endpoint registry (beacon-discovered + static seeds).
 	reg := discovery.NewRegistry()
@@ -113,6 +124,36 @@ func run() error {
 		defer wg.Done()
 		rec.Serve(cfg.MetricsAddr, done)
 	}()
+
+	// Start subtree announcement listener (BRC-127).
+	if groupReg != nil {
+		var announceGroups []*net.UDPAddr
+		for _, scopeName := range cfg.AnnounceScopes {
+			scopePrefix := config.Scopes[scopeName]
+			annIP := shard.ControlGroupAddr(scopePrefix, cfg.MCMiddleBytes, shard.CtrlGroupSubtreeAnnounce)
+			announceGroups = append(announceGroups, &net.UDPAddr{IP: annIP, Port: cfg.ListenPort})
+		}
+		sal := &discovery.SubtreeAnnounceListener{
+			Registry:      groupReg,
+			Groups:        announceGroups,
+			Iface:         cfg.Iface,
+			DefaultTTL:    cfg.SubtreeGroupDefaultTTL,
+			SenderInclude: cfg.SenderInclude,
+			SenderExclude: cfg.SenderExclude,
+			Debug:         cfg.Debug,
+		}
+		wg.Add(1)
+		go func() {
+			defer wg.Done()
+			if err := sal.Start(ctx); err != nil && ctx.Err() == nil {
+				slog.Error("subtree announce listener error", "err", err)
+			}
+		}()
+		slog.Info("subtree announce listener started",
+			"groups", len(announceGroups),
+			"scopes", cfg.AnnounceScopes,
+		)
+	}
 
 	// Start beacon listener for dynamic endpoint discovery.
 	if cfg.BeaconEnabled {
