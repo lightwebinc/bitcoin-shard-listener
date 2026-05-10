@@ -3,9 +3,12 @@ package discovery
 import (
 	"context"
 	"encoding/hex"
+	"fmt"
 	"log/slog"
 	"net"
 	"time"
+
+	"golang.org/x/sys/unix"
 
 	"github.com/lightwebinc/bitcoin-shard-common/frame"
 	"github.com/lightwebinc/bitcoin-shard-listener/subtreegroup"
@@ -48,36 +51,42 @@ func (sl *SubtreeAnnounceListener) Start(ctx context.Context) error {
 }
 
 func (sl *SubtreeAnnounceListener) listenGroup(ctx context.Context, grp *net.UDPAddr) error {
-	conn, err := net.ListenMulticastUDP("udp6", sl.Iface, grp)
+	fd, err := openAnnounceSocket(sl.Iface, grp)
 	if err != nil {
 		return err
 	}
-	defer func() { _ = conn.Close() }()
 
-	_ = conn.SetReadBuffer(1 << 16)
+	// Periodic wakeup so we can check ctx cancellation.
+	tv := unix.NsecToTimeval((2 * time.Second).Nanoseconds())
+	_ = unix.SetsockoptTimeval(fd, unix.SOL_SOCKET, unix.SO_RCVTIMEO, &tv)
+
+	go func() {
+		<-ctx.Done()
+		_ = unix.Close(fd)
+	}()
 
 	buf := make([]byte, frame.SubtreeAnnounceSize+64)
 
 	for {
-		select {
-		case <-ctx.Done():
-			return nil
-		default:
-		}
-
-		_ = conn.SetReadDeadline(time.Now().Add(2 * time.Second))
-		n, src, err := conn.ReadFromUDP(buf)
+		n, from, err := unix.Recvfrom(fd, buf, 0)
 		if err != nil {
-			if ne, ok := err.(net.Error); ok && ne.Timeout() {
+			if err == unix.EAGAIN || err == unix.EWOULDBLOCK {
+				if ctx.Err() != nil {
+					return nil
+				}
 				continue
 			}
-			select {
-			case <-ctx.Done():
+			if err == unix.EBADF || err == unix.EINVAL {
 				return nil
-			default:
-				slog.Warn("subtree_announce: read error", "group", grp.IP, "err", err)
+			}
+			if err == unix.EINTR {
 				continue
 			}
+			if ctx.Err() != nil {
+				return nil
+			}
+			slog.Warn("subtree_announce: read error", "group", grp.IP, "err", err)
+			continue
 		}
 
 		if n < frame.SubtreeAnnounceSize {
@@ -87,6 +96,7 @@ func (sl *SubtreeAnnounceListener) listenGroup(ctx context.Context, grp *net.UDP
 			continue
 		}
 
+		src := sockaddrToUDP(from)
 		if !sl.senderAllowed(src) {
 			if sl.Debug {
 				slog.Debug("subtree_announce: sender rejected by filter", "src", src.IP)
@@ -117,6 +127,41 @@ func (sl *SubtreeAnnounceListener) listenGroup(ctx context.Context, grp *net.UDP
 			)
 		}
 	}
+}
+
+// openAnnounceSocket creates a UDP6 socket with SO_REUSEPORT, binds to
+// [::]:port, and joins the specified multicast group. SO_REUSEPORT is
+// required so the announce listener coexists with the data worker, which
+// also binds the same port with SO_REUSEPORT.
+func openAnnounceSocket(iface *net.Interface, grp *net.UDPAddr) (int, error) {
+	fd, err := unix.Socket(unix.AF_INET6, unix.SOCK_DGRAM|unix.SOCK_CLOEXEC, 0)
+	if err != nil {
+		return -1, fmt.Errorf("socket: %w", err)
+	}
+	if err := unix.SetsockoptInt(fd, unix.SOL_SOCKET, unix.SO_REUSEPORT, 1); err != nil {
+		_ = unix.Close(fd)
+		return -1, fmt.Errorf("SO_REUSEPORT: %w", err)
+	}
+	sa := &unix.SockaddrInet6{Port: grp.Port}
+	if err := unix.Bind(fd, sa); err != nil {
+		_ = unix.Close(fd)
+		return -1, fmt.Errorf("bind [::]::%d: %w", grp.Port, err)
+	}
+	mreq := &unix.IPv6Mreq{Interface: uint32(iface.Index)}
+	copy(mreq.Multiaddr[:], grp.IP.To16())
+	if err := unix.SetsockoptIPv6Mreq(fd, unix.IPPROTO_IPV6, unix.IPV6_JOIN_GROUP, mreq); err != nil {
+		_ = unix.Close(fd)
+		return -1, fmt.Errorf("join group %s: %w", grp.IP, err)
+	}
+	return fd, nil
+}
+
+// sockaddrToUDP converts a unix.Sockaddr to *net.UDPAddr.
+func sockaddrToUDP(sa unix.Sockaddr) *net.UDPAddr {
+	if sa6, ok := sa.(*unix.SockaddrInet6); ok {
+		return &net.UDPAddr{IP: net.IP(sa6.Addr[:])}
+	}
+	return &net.UDPAddr{}
 }
 
 // senderAllowed applies exclude → include filtering on the UDP source.
