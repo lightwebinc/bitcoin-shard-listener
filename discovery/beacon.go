@@ -5,6 +5,8 @@ import (
 	"log"
 	"net"
 	"time"
+
+	"github.com/lightwebinc/bitcoin-shard-listener/metrics"
 )
 
 // BeaconListener joins the beacon multicast groups and upserts received
@@ -12,8 +14,9 @@ import (
 // context to stop.
 type BeaconListener struct {
 	Registry *Registry
-	Groups   []*net.UDPAddr // beacon group addresses to join
-	Iface    *net.Interface // multicast interface
+	Groups   []*net.UDPAddr    // beacon group addresses to join
+	Iface    *net.Interface    // multicast interface
+	Rec      *metrics.Recorder // nil = no metrics
 	Debug    bool
 }
 
@@ -94,6 +97,9 @@ func (bl *BeaconListener) listenGroup(ctx context.Context, grp *net.UDPAddr) err
 		}
 
 		bl.Registry.Upsert(advert)
+		if bl.Rec != nil {
+			bl.Rec.BeaconAdvertReceived()
+		}
 		if bl.Debug {
 			log.Printf("discovery: upserted endpoint [%s]:%d tier=%d pref=%d instance=%08X",
 				advert.NACKAddr, advert.NACKPort, advert.Tier, advert.Preference, advert.InstanceID)
@@ -110,6 +116,9 @@ func (bl *BeaconListener) evictLoop(ctx context.Context) {
 			return
 		case <-ticker.C:
 			bl.Registry.Evict()
+			if bl.Rec != nil {
+				bl.Rec.SetBeaconRegistryEndpoints(bl.Registry.Len())
+			}
 		}
 	}
 }

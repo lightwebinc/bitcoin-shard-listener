@@ -11,6 +11,7 @@ import (
 	"golang.org/x/sys/unix"
 
 	"github.com/lightwebinc/bitcoin-shard-common/frame"
+	"github.com/lightwebinc/bitcoin-shard-listener/metrics"
 	"github.com/lightwebinc/bitcoin-shard-listener/subtreegroup"
 )
 
@@ -20,11 +21,12 @@ import (
 // cancel the context to stop.
 type SubtreeAnnounceListener struct {
 	Registry      *subtreegroup.Registry
-	Groups        []*net.UDPAddr // control group addresses to join
-	Iface         *net.Interface // multicast interface
-	DefaultTTL    time.Duration  // applied when announcement TTL == 0
-	SenderInclude []*net.IPNet   // nil/empty = accept all non-excluded sources
-	SenderExclude []*net.IPNet   // checked before include
+	Groups        []*net.UDPAddr    // control group addresses to join
+	Iface         *net.Interface    // multicast interface
+	DefaultTTL    time.Duration     // applied when announcement TTL == 0
+	SenderInclude []*net.IPNet      // nil/empty = accept all non-excluded sources
+	SenderExclude []*net.IPNet      // checked before include
+	Rec           *metrics.Recorder // nil = no metrics
 	Debug         bool
 }
 
@@ -90,6 +92,9 @@ func (sl *SubtreeAnnounceListener) listenGroup(ctx context.Context, grp *net.UDP
 		}
 
 		if n < frame.SubtreeAnnounceSize {
+			if sl.Rec != nil {
+				sl.Rec.SubtreeAnnounceRejected("too_short")
+			}
 			if sl.Debug {
 				slog.Debug("subtree_announce: datagram too short", "n", n)
 			}
@@ -98,6 +103,9 @@ func (sl *SubtreeAnnounceListener) listenGroup(ctx context.Context, grp *net.UDP
 
 		src := sockaddrToUDP(from)
 		if !sl.senderAllowed(src) {
+			if sl.Rec != nil {
+				sl.Rec.SubtreeAnnounceRejected("sender_filter")
+			}
 			if sl.Debug {
 				slog.Debug("subtree_announce: sender rejected by filter", "src", src.IP)
 			}
@@ -106,6 +114,9 @@ func (sl *SubtreeAnnounceListener) listenGroup(ctx context.Context, grp *net.UDP
 
 		ann, err := frame.DecodeSubtreeAnnounce(buf[:n])
 		if err != nil {
+			if sl.Rec != nil {
+				sl.Rec.SubtreeAnnounceRejected("decode_error")
+			}
 			if sl.Debug {
 				slog.Debug("subtree_announce: decode error", "err", err)
 			}
@@ -117,6 +128,9 @@ func (sl *SubtreeAnnounceListener) listenGroup(ctx context.Context, grp *net.UDP
 			ttl = time.Duration(ann.TTL) * time.Second
 		}
 		sl.Registry.Add(ann.GroupID, ann.SubtreeID, ttl)
+		if sl.Rec != nil {
+			sl.Rec.SubtreeAnnounceReceived()
+		}
 
 		if sl.Debug {
 			slog.Debug("subtree_announce: added entry",
@@ -192,7 +206,10 @@ func (sl *SubtreeAnnounceListener) evictLoop(ctx context.Context) {
 		case <-ctx.Done():
 			return
 		case <-ticker.C:
-			sl.Registry.Evict()
+			evicted := sl.Registry.Evict()
+			if sl.Rec != nil {
+				sl.Rec.SubtreeGroupEvicted(evicted, sl.Registry.Len())
+			}
 		}
 	}
 }

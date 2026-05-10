@@ -19,8 +19,8 @@ import (
 // of subscribed group IDs. Safe for concurrent use.
 type Registry struct {
 	mu               sync.RWMutex
-	subscribedGroups map[[16]byte]struct{}                    // set for O(1) membership test
-	entries          map[[16]byte]map[[32]byte]time.Time      // groupID → subtreeID → expiry
+	subscribedGroups map[[16]byte]struct{}               // set for O(1) membership test
+	entries          map[[16]byte]map[[32]byte]time.Time // groupID → subtreeID → expiry
 	defaultTTL       time.Duration
 }
 
@@ -83,18 +83,22 @@ func (r *Registry) Contains(subtreeID [32]byte) bool {
 }
 
 // Evict removes all entries whose TTL has elapsed. Call this on a periodic
-// tick (e.g. every second) to bound memory use.
-func (r *Registry) Evict() {
+// tick (e.g. every second) to bound memory use. Returns the number of entries
+// removed.
+func (r *Registry) Evict() int {
 	now := time.Now()
+	var n int
 	r.mu.Lock()
 	for gid, subs := range r.entries {
 		for sid, expiry := range subs {
 			if now.After(expiry) {
 				delete(r.entries[gid], sid)
+				n++
 			}
 		}
 	}
 	r.mu.Unlock()
+	return n
 }
 
 // Len returns the total number of (groupID, subtreeID) pairs currently stored,

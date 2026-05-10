@@ -140,6 +140,7 @@ func run() error {
 			DefaultTTL:    cfg.SubtreeGroupDefaultTTL,
 			SenderInclude: cfg.SenderInclude,
 			SenderExclude: cfg.SenderExclude,
+			Rec:           rec,
 			Debug:         cfg.Debug,
 		}
 		wg.Add(1)
@@ -167,6 +168,7 @@ func run() error {
 			Registry: reg,
 			Groups:   []*net.UDPAddr{beaconGrp},
 			Iface:    cfg.Iface,
+			Rec:      rec,
 			Debug:    cfg.Debug,
 		}
 		wg.Add(1)

@@ -57,6 +57,20 @@ type Recorder struct {
 	gapsSuppressed   metric.Int64Counter // cancelled by retransmit fill or ACK response
 	nacksDispatched  metric.Int64Counter
 	nacksUnrecovered metric.Int64Counter // retries exhausted or TTL exceeded
+
+	// BRC-127 subtree group announce counters
+	subtreeAnnouncesReceived metric.Int64Counter
+	subtreeAnnouncesRejected metric.Int64Counter
+	subtreeGroupEvictions    metric.Int64Counter
+
+	// Subtree group registry size (updated by evict loop)
+	subtreeGroupEntries atomic.Int64
+
+	// Beacon discovery counter
+	beaconAdvertsReceived metric.Int64Counter
+
+	// Beacon registry endpoint count (updated by evict loop)
+	beaconRegistryEndpoints atomic.Int64
 }
 
 // New constructs and returns a Recorder.
@@ -171,6 +185,42 @@ func New(instanceID string, numWorkers int, otlpEndpoint string, otlpInterval ti
 		return nil, err
 	}
 
+	if r.subtreeAnnouncesReceived, err = meter.Int64Counter("bsl_subtree_announces_received_total",
+		metric.WithDescription("Valid SubtreeAnnounce datagrams processed (BRC-127)")); err != nil {
+		return nil, err
+	}
+	if r.subtreeAnnouncesRejected, err = meter.Int64Counter("bsl_subtree_announces_rejected_total",
+		metric.WithDescription("SubtreeAnnounce datagrams rejected before registry update")); err != nil {
+		return nil, err
+	}
+	if r.subtreeGroupEvictions, err = meter.Int64Counter("bsl_subtree_group_evictions_total",
+		metric.WithDescription("Subtree group registry entries removed by TTL expiry")); err != nil {
+		return nil, err
+	}
+	if _, err = meter.Int64ObservableGauge("bsl_subtree_group_entries",
+		metric.WithDescription("Live (groupID, subtreeID) pairs in the subtree group registry"),
+		metric.WithInt64Callback(func(_ context.Context, o metric.Int64Observer) error {
+			o.Observe(r.subtreeGroupEntries.Load())
+			return nil
+		}),
+	); err != nil {
+		return nil, err
+	}
+
+	if r.beaconAdvertsReceived, err = meter.Int64Counter("bsl_beacon_adverts_received_total",
+		metric.WithDescription("Valid ADVERT beacon datagrams upserted into the endpoint registry")); err != nil {
+		return nil, err
+	}
+	if _, err = meter.Int64ObservableGauge("bsl_beacon_registry_endpoints",
+		metric.WithDescription("Number of endpoints currently in the beacon discovery registry"),
+		metric.WithInt64Callback(func(_ context.Context, o metric.Int64Observer) error {
+			o.Observe(r.beaconRegistryEndpoints.Load())
+			return nil
+		}),
+	); err != nil {
+		return nil, err
+	}
+
 	return r, nil
 }
 
@@ -233,6 +283,38 @@ func (r *Recorder) NACKDispatched() {
 // GapUnrecovered records a gap evicted after retries exhausted or TTL exceeded.
 func (r *Recorder) GapUnrecovered() {
 	r.nacksUnrecovered.Add(context.Background(), 1)
+}
+
+// SubtreeAnnounceReceived records a valid SubtreeAnnounce datagram processed.
+func (r *Recorder) SubtreeAnnounceReceived() {
+	r.subtreeAnnouncesReceived.Add(context.Background(), 1)
+}
+
+// SubtreeAnnounceRejected records a rejected SubtreeAnnounce datagram.
+// reason: "too_short", "decode_error", "sender_filter".
+func (r *Recorder) SubtreeAnnounceRejected(reason string) {
+	r.subtreeAnnouncesRejected.Add(context.Background(), 1, metric.WithAttributes(
+		attribute.String("reason", reason),
+	))
+}
+
+// SubtreeGroupEvicted records entries removed from the subtree group registry
+// by TTL expiry and updates the live-entry gauge.
+func (r *Recorder) SubtreeGroupEvicted(evicted, remaining int) {
+	if evicted > 0 {
+		r.subtreeGroupEvictions.Add(context.Background(), int64(evicted))
+	}
+	r.subtreeGroupEntries.Store(int64(remaining))
+}
+
+// BeaconAdvertReceived records a valid ADVERT beacon upserted into the registry.
+func (r *Recorder) BeaconAdvertReceived() {
+	r.beaconAdvertsReceived.Add(context.Background(), 1)
+}
+
+// SetBeaconRegistryEndpoints updates the beacon registry endpoint count gauge.
+func (r *Recorder) SetBeaconRegistryEndpoints(n int) {
+	r.beaconRegistryEndpoints.Store(int64(n))
 }
 
 // WorkerReady signals a worker has entered its receive loop.
