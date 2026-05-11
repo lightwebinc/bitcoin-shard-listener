@@ -221,6 +221,17 @@ func New(instanceID string, numWorkers int, otlpEndpoint string, otlpInterval ti
 		return nil, err
 	}
 
+	if _, err = meter.Float64ObservableGauge("bsl_uptime_seconds",
+		metric.WithDescription("Seconds elapsed since the listener process started"),
+		metric.WithUnit("s"),
+		metric.WithFloat64Callback(func(_ context.Context, o metric.Float64Observer) error {
+			o.Observe(time.Since(r.startTime).Seconds())
+			return nil
+		}),
+	); err != nil {
+		return nil, err
+	}
+
 	return r, nil
 }
 
