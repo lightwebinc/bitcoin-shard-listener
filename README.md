@@ -1,5 +1,7 @@
 # bitcoin-shard-listener
 
+[![CI](https://github.com/lightwebinc/bitcoin-shard-listener/actions/workflows/ci.yml/badge.svg)](https://github.com/lightwebinc/bitcoin-shard-listener/actions/workflows/ci.yml)
+
 Multicast subscriber and forwarder for the BSV transaction sharding pipeline.
 Receives BRC-124 frames from the `bitcoin-shard-proxy` multicast fabric, applies
 shard and subtree filters, forwards matching frames to a configurable downstream
