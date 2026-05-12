@@ -55,7 +55,7 @@ default) means subscribe to all groups. Example: `0,1,3`.
 
 ### `-subtree-include` / `SUBTREE_INCLUDE`
 
-Comma-separated list of 32-byte hex SubtreeIDs to allow (BRC-124 frames only).
+Comma-separated list of 32-byte hex SubtreeIDs to allow (BRC-124/BRC-128 frames only).
 Empty means accept all subtrees.
 
 ### `-subtree-exclude` / `SUBTREE_EXCLUDE`
@@ -81,7 +81,7 @@ Egress protocol: `udp` or `tcp`.
 ### `-strip-header` / `STRIP_HEADER` (default: `false`)
 
 When `true`, only the raw BSV transaction payload is forwarded (no frame
-header). When `false`, the complete 92-byte BRC-124 frame is forwarded verbatim.
+header). When `false`, the complete 92-byte BRC-124/BRC-128 frame is forwarded verbatim.
 
 ---
 
@@ -154,7 +154,7 @@ multicast delivery (requires PIM or similar on intermediate routers).
 
 ## NACK / Gap Recovery
 
-Gap tracking is performed for BRC-124 frames where `CurSeq` (bytes 48–55) is
+Gap tracking is performed for BRC-124/BRC-128 frames where `CurSeq` (bytes 48–55) is
 non-zero. `CurSeq` is stamped in-place by the proxy as
 `XXH64(senderIPv6 ∥ groupIdx ∥ counter)`; a zero value means the proxy has not
 yet stamped the frame and gap tracking is skipped.

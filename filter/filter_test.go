@@ -91,7 +91,7 @@ func TestV1ZeroSubtreeNotInInclude(t *testing.T) {
 	f := filter.New(nil, [][32]byte{allowed}, nil, nil)
 	v1 := &frame.Frame{Version: frame.FrameVerV1, SubtreeID: [32]byte{}}
 	if ok, _ := f.Allow(0, v1); ok {
-		t.Error("v1 frame with zero SubtreeID should be denied when subtree-include is non-empty")
+		t.Error("BRC-12 frame with zero SubtreeID should be denied when subtree-include is non-empty")
 	}
 }
 
@@ -99,7 +99,7 @@ func TestV1ZeroSubtreeInInclude(t *testing.T) {
 	f := filter.New(nil, [][32]byte{{}}, nil, nil)
 	v1 := &frame.Frame{Version: frame.FrameVerV1, SubtreeID: [32]byte{}}
 	if ok, _ := f.Allow(0, v1); !ok {
-		t.Error("v1 frame allowed when zero SubtreeID is explicitly included")
+		t.Error("BRC-12 frame allowed when zero SubtreeID is explicitly included")
 	}
 }
 

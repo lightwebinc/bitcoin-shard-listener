@@ -1,7 +1,6 @@
 // bitcoin-shard-listener receives IPv6 multicast BSV transaction frames,
 // filters by shard and/or subtree, forwards matching frames to a configurable
-// downstream unicast host:port over UDP or TCP, and performs NORM-inspired
-// NACK-based gap recovery for BRC-124 frames.
+// downstream unicast host:port over UDP or TCP, and performs NACK-based gap recovery for BRC-124/BRC-128 frames.
 package main
 
 import (

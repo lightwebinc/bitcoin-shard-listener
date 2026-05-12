@@ -173,9 +173,9 @@ func (w *Worker) processFrame(raw []byte) {
 	}
 
 	if w.rec != nil {
-		ver := "v1"
+		ver := "brc12"
 		if f.Version == frame.FrameVerV2 {
-			ver = "brc122"
+			ver = "brc124"
 		}
 		w.rec.FrameReceived(w.id, w.iface.Name, ver)
 	}
@@ -214,7 +214,7 @@ func (w *Worker) processFrame(raw []byte) {
 		}
 	}
 
-	// Gap tracking: BRC-124 only, CurSeq must be non-zero (proxy-stamped).
+	// Gap tracking: BRC-124/BRC-128 only, CurSeq must be non-zero (proxy-stamped).
 	if w.tracker != nil && f.Version == frame.FrameVerV2 && f.CurSeq != 0 {
 		w.tracker.Observe(groupIdx, f.PrevSeq, f.CurSeq, f.TxID)
 	}

@@ -109,7 +109,7 @@ func New(cfg TrackerConfig, retryEndpoints []string, iface *net.Interface, rec *
 	}
 }
 
-// Observe is called by the listener worker on every BRC-124 v2 frame.
+// Observe is called by the listener worker on every BRC-124/BRC-128 frame.
 // It detects chain breaks via tail matching and schedules NACKs.
 // curSeq == 0 means the proxy has not yet stamped the frame; it is ignored.
 //

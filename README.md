@@ -8,7 +8,7 @@
 [![License](https://img.shields.io/badge/license-Apache%202.0-blue.svg)](LICENSE)
 
 Multicast subscriber and forwarder for the BSV transaction sharding pipeline.
-Receives BRC-124 frames from the `bitcoin-shard-proxy` multicast fabric, applies
+Receives BRC-124/BRC-128 frames from the `bitcoin-shard-proxy` multicast fabric, applies
 shard and subtree filters, forwards matching frames to a configurable downstream
 consumer over unicast UDP/TCP and/or multicast egress (domain bridging), and
 performs NORM-inspired NACK-based gap recovery via PrevSeq/CurSeq hash-chain
@@ -19,9 +19,9 @@ tier-based escalation.
 
 - **SO_REUSEPORT** multi-worker receive with kernel-level source affinity
 - **Shard filter** — subscribe to a subset of shard groups (empty = all)
-- **Subtree filter** — include/exclude by 32-byte SubtreeID (BRC-124 frames)
+- **Subtree filter** — include/exclude by 32-byte SubtreeID (BRC-124/BRC-128 frames)
 - **BRC-127 subtree group announcements** — dynamic group-based filtering via multicast SubtreeAnnounce datagrams with TTL eviction and sender ACLs
-- **Gap tracking** — per-group PrevSeq/CurSeq hash-chain gap detection (BRC-124)
+- **Gap tracking** — per-group PrevSeq/CurSeq hash-chain gap detection (BRC-124/BRC-128)
 - **NACK dispatch** — 24-byte NACK datagrams (LookupType + LookupSeq) with 16-byte ACK/MISS response handling
 - **Beacon discovery** — dynamic retry endpoint registry via BRC-126 ADVERT beacons
 - **Tier escalation** — MISS → immediate advance to next endpoint; ACK → gap cancelled

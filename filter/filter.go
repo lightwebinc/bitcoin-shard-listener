@@ -7,8 +7,8 @@
 //  3. Its SubtreeID is in the subtree-include set OR in any subscribed subtree
 //     group (via groupReg), OR both sets are empty (accept all).
 //
-// V1 frames have a zero SubtreeID. If subtree-include is non-empty and no
-// group registry is set, a V1 frame will pass only if [32]byte{} is in the
+// BRC-12 frames have a zero SubtreeID. If subtree-include is non-empty and no
+// group registry is set, a BRC-12 frame will pass only if [32]byte{} is in the
 // include set.
 package filter
 

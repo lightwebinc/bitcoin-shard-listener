@@ -3,7 +3,7 @@
 ## Overview
 
 `bitcoin-shard-listener` sits downstream of `bitcoin-shard-proxy` in the BSV
-transaction distribution pipeline. The proxy multicasts BRC-124 frames onto an
+transaction distribution pipeline. The proxy multicasts BRC-124/BRC-128 frames onto an
 IPv6 multicast fabric; the listener joins the relevant groups, filters frames
 by shard index and/or subtree ID, forwards matching frames to a configurable
 unicast downstream over UDP or TCP and/or re-emits them via multicast egress
@@ -14,7 +14,7 @@ BSV senders
    │ (TCP or UDP ingress)
    ▼
 bitcoin-shard-proxy
-   │ BRC-124 frames, PrevSeq/CurSeq stamped in-place at bytes 40–55 (XXH64)
+   │ BRC-124/BRC-128 frames, PrevSeq/CurSeq stamped in-place at bytes 40–55 (XXH64)
    │ IPv6 multicast  FF05::<group-index>
    ▼
 Multicast fabric (site-scoped FF05::/16)
@@ -35,7 +35,7 @@ Each worker:
 3. Calls `frame.Decode`, `shard.Engine.GroupIndex`, `filter.Allow`,
    `egress.Send`, and optionally `mcastEgr.Send` in the hot path for every
    received datagram.
-4. Calls `nack.Tracker.Observe` for BRC-124 frames with non-zero `CurSeq`.
+4. Calls `nack.Tracker.Observe` for BRC-124/BRC-128 frames with non-zero `CurSeq`.
 
 **SO_REUSEPORT and multicast:** Linux does **not** load-balance multicast
 datagrams across SO_REUSEPORT sockets — every socket that has joined the group
@@ -47,7 +47,7 @@ SO_REUSEPORT load balancing applies to unicast UDP only. The E2E test suite
 exploits this property by injecting frames as unicast to `[::]:listen-port`,
 allowing multiple worker sockets to be tested in isolation.
 
-## BRC-124 frame format (92 bytes)
+## BRC-124/BRC-128 frame format (92 bytes)
 
 All multi-byte integers are big-endian. Layout is defined in
 `bitcoin-shard-common/frame/frame.go`.
@@ -57,14 +57,14 @@ Offset  Size  Align  Field          Value / notes
 ------  ----  -----  -----          -------------
      0     4   —     Network magic  0xE3E1F3E8
      4     2   —     Protocol ver   0x02BF
-     6     1   —     Frame version  0x02 (BRC-124)
+     6     1   —     Frame version  0x02 (BRC-124/BRC-128)
      7     1   —     Reserved       0x00
      8    32   8B    TxID           raw 256-bit txid (internal byte order)
     40     8   8B    PrevSeq        XXH64 of previous chain state; 0 = unset
     48     8   8B    CurSeq         XXH64 of current chain state; 0 = unset
     56    32   8B    SubtreeID      32-byte batch identifier; zeros = unset
     88     4   —     PayloadLen     uint32 BE
-    92     *   —     Payload        raw serialised BSV transaction
+    92     *   —     Payload        raw serialised BSV transaction (BRC-12 or BRC-30 EF for BRC-128)
 ```
 
 `PrevSeq` and `CurSeq` form a hash chain: each frame's `PrevSeq` equals the
@@ -141,13 +141,13 @@ Filtering is pure (no I/O) and allocation-free on the hot path:
 | `subtree-include` non-empty | only listed IDs accepted |
 | `subtree-exclude` | listed IDs dropped; overrides include |
 
-## V1 frame support
+## BRC-12 (legacy) frame support
 
-`frame.Decode` accepts both v1 (44-byte header) and BRC-124 (92-byte header) frames.
-v1 frames are decoded with zero-valued `PrevSeq`, `CurSeq`, and `SubtreeID`.
-Shard filtering applies to v1 frames normally; subtree filtering has no effect
+`frame.Decode` accepts both BRC-12 (44-byte header) and BRC-124/BRC-128 (92-byte header) frames.
+BRC-12 frames are decoded with zero-valued `PrevSeq`, `CurSeq`, and `SubtreeID`.
+Shard filtering applies to BRC-12 frames normally; subtree filtering has no effect
 (zero `SubtreeID` passes all include/exclude checks). Gap tracking is skipped
-for v1 frames because `CurSeq` is zero.
+for BRC-12 frames because `CurSeq` is zero.
 
 ## Egress
 
@@ -161,7 +161,7 @@ A single `egress.Sender` per worker delivers frames to `egress-addr`:
 | `tcp` | lazy connect on first frame; reconnect on write error |
 
 `strip-header=true` sends only the raw BSV transaction bytes (frame payload);
-`strip-header=false` (default) sends the complete 92-byte BRC-124 frame verbatim.
+`strip-header=false` (default) sends the complete 92-byte BRC-124/BRC-128 frame verbatim.
 
 ### Multicast egress (domain bridging)
 
