@@ -1,6 +1,11 @@
 # bitcoin-shard-listener
 
 [![CI](https://github.com/lightwebinc/bitcoin-shard-listener/actions/workflows/ci.yml/badge.svg)](https://github.com/lightwebinc/bitcoin-shard-listener/actions/workflows/ci.yml)
+[![CodeQL](https://github.com/lightwebinc/bitcoin-shard-listener/actions/workflows/codeql.yml/badge.svg)](https://github.com/lightwebinc/bitcoin-shard-listener/actions/workflows/codeql.yml)
+[![Release](https://img.shields.io/github/v/release/lightwebinc/bitcoin-shard-listener)](https://github.com/lightwebinc/bitcoin-shard-listener/releases)
+[![Go Reference](https://pkg.go.dev/badge/github.com/lightwebinc/bitcoin-shard-listener.svg)](https://pkg.go.dev/github.com/lightwebinc/bitcoin-shard-listener)
+[![Go Report Card](https://goreportcard.com/badge/github.com/lightwebinc/bitcoin-shard-listener)](https://goreportcard.com/report/github.com/lightwebinc/bitcoin-shard-listener)
+[![License](https://img.shields.io/badge/license-Apache%202.0-blue.svg)](LICENSE)
 
 Multicast subscriber and forwarder for the BSV transaction sharding pipeline.
 Receives BRC-124 frames from the `bitcoin-shard-proxy` multicast fabric, applies
