@@ -25,11 +25,12 @@ Multicast scope nibble. Must match the proxy's `-scope`.
 | `org` | `FF08` | Organisation-wide |
 | `global` | `FF0E` | Internet-wide |
 
-### `-mc-base-addr` / `MC_BASE_ADDR`
+### `-mc-group-id` / `MC_GROUP_ID` (default: `0x000B`)
 
-Base IPv6 address for the assigned multicast address space (bytes 2–12). Must
-match the proxy's `-mc-base-addr`. Leave empty to use the default all-zeros
-middle bytes.
+IANA group-id occupying bytes 12–13 of every IPv6 multicast group address.
+The default `0x000B` corresponds to the IANA-assigned Bitcoin allocation
+`FF0X::B`. Must match the proxy's `-mc-group-id`. Operators MAY override
+(e.g. `0xCAFE`) for testing or private deployments.
 
 ---
 
@@ -41,12 +42,12 @@ Txid prefix bit width used as the shard key. Must exactly match the proxy's
 `-shard-bits`. Determines how many multicast groups exist (2ᴺ).
 
 | Bits | Groups |
-|------|------------|
+|------|--------|
 | 1 | 2 |
 | 2 | 4 |
 | 8 | 256 |
-| 16 | 65 536 |
-| 24 | 16 777 216 |
+| 12 | 4 096 |
+| 15 | 32 768 (max; top of 16-bit space reserved for control) |
 
 ### `-shard-include` / `SHARD_INCLUDE`
 
@@ -126,10 +127,10 @@ routed delivery.
 | `org` | `FF08` | Organisation-wide |
 | `global` | `FF0E` | Internet-wide |
 
-### `-mc-egress-base-addr` / `MC_EGRESS_BASE_ADDR` (default: same as `-mc-base-addr`)
+### `-mc-egress-group-id` / `MC_EGRESS_GROUP_ID` (default: same as `-mc-group-id`)
 
-Base IPv6 address for the egress multicast group address space (bytes 2–12).
-Leave unset to re-emit on the same operator prefix as ingress (only the scope
+IANA group-id (bytes 12–13) for egress multicast group addresses.
+Leave unset to re-emit on the same group-id as ingress (only the scope
 changes). Set to a different prefix to bridge between unrelated address spaces.
 
 ### `-mc-egress-hoplimit` / `MC_EGRESS_HOPLIMIT` (default: `1`)
@@ -144,7 +145,7 @@ multicast delivery (requires PIM or similar on intermediate routers).
 > is in use.
 
 > **Same address-space warning:** if `-mc-egress-scope` and
-> `-mc-egress-base-addr` match the ingress address space, re-emitted frames
+> `-mc-egress-group-id` match the ingress address space, re-emitted frames
 > will be visible to all other listeners joined to those groups on the same
 > fabric. `IPV6_MULTICAST_LOOP=0` prevents the sending host from re-ingesting
 > its own frames, but other hosts on the segment will receive duplicates unless
@@ -231,7 +232,7 @@ used by the retry endpoints.
 ## Subtree Group Announcements (BRC-127)
 
 When configured, the listener joins the `CtrlGroupSubtreeAnnounce`
-(`0xFFFFFC`) control-plane multicast group and receives `SubtreeAnnounce`
+(`0xFFFC`) control-plane multicast group and receives `SubtreeAnnounce`
 datagrams from block assemblers (via the proxy TCP ingress). Announced
 SubtreeIDs are added to a dynamic registry with TTL-based eviction. The
 filter treats registry membership as an additional pass condition alongside

@@ -8,9 +8,9 @@
 //	Flag                  Env var              Default          Description
 //	-iface                MULTICAST_IF         eth0             NIC for multicast joins and NACK send
 //	-listen-port          LISTEN_PORT          9001             UDP port for incoming multicast frames
-//	-shard-bits           SHARD_BITS           2                Must match proxy (1–24)
+//	-shard-bits           SHARD_BITS           2                Must match proxy (1–15)
 //	-scope                MC_SCOPE             site             Multicast scope
-//	-mc-base-addr         MC_BASE_ADDR                          Base IPv6 for group address space
+//	-mc-group-id          MC_GROUP_ID          0x000B           IANA group-id (default Bitcoin = 0x000B)
 //	-shard-include        SHARD_INCLUDE                         Comma-separated shard indices/ranges (empty=all)
 //	-subtree-include      SUBTREE_INCLUDE                       Hex subtree IDs to allow (empty=all)
 //	-subtree-exclude      SUBTREE_EXCLUDE                       Hex subtree IDs to drop (empty=none)
@@ -21,7 +21,7 @@
 //	-mc-egress-iface      MC_EGRESS_IFACE      (=iface)         Output NIC for multicast send
 //	-mc-egress-port       MC_EGRESS_PORT       (=listen-port)   Egress group UDP port
 //	-mc-egress-scope      MC_EGRESS_SCOPE      (=scope)         Multicast scope for egress groups
-//	-mc-egress-base-addr  MC_EGRESS_BASE_ADDR  (=mc-base-addr)  Base IPv6 for egress address space
+//	-mc-egress-group-id   MC_EGRESS_GROUP_ID   (=mc-group-id)   IANA group-id for egress groups
 //	-mc-egress-hoplimit   MC_EGRESS_HOPLIMIT   1                IPV6_MULTICAST_HOPS
 //	-retry-endpoints      RETRY_ENDPOINTS                       Comma-separated host:port retry nodes
 //	-nack-jitter-max      NACK_JITTER_MAX      200ms            Max NACK suppression jitter
@@ -84,8 +84,7 @@ type Config struct {
 	NumGroups      uint32
 	MCScope        string
 	MCPrefix       uint16
-	MCBaseAddr     string
-	MCMiddleBytes  [11]byte
+	MCGroupID      uint16
 	ShardInclude   []uint32   // empty = all
 	SubtreeInclude [][32]byte // empty = all allowed
 	SubtreeExclude [][32]byte // empty = none excluded
@@ -97,14 +96,13 @@ type Config struct {
 	NACKGapTTL     time.Duration
 
 	// Multicast egress (domain bridging)
-	MCEgressEnabled     bool
-	MCEgressIface       *net.Interface
-	MCEgressPort        int
-	MCEgressScope       string
-	MCEgressPrefix      uint16
-	MCEgressBaseAddr    string
-	MCEgressMiddleBytes [11]byte
-	MCEgressHopLimit    int
+	MCEgressEnabled  bool
+	MCEgressIface    *net.Interface
+	MCEgressPort     int
+	MCEgressScope    string
+	MCEgressPrefix   uint16
+	MCEgressGroupID  uint16
+	MCEgressHopLimit int
 
 	// Beacon discovery (BRC-126)
 	BeaconEnabled bool
@@ -141,8 +139,8 @@ func Load() (*Config, error) {
 		"UDP port to receive multicast frames on")
 	flag.StringVar(&c.MCScope, "scope", envStr("MC_SCOPE", "site"),
 		"multicast scope: link | site | org | global")
-	flag.StringVar(&c.MCBaseAddr, "mc-base-addr", envStr("MC_BASE_ADDR", ""),
-		"base IPv6 address for assigned multicast address space (bytes 2–12)")
+	groupIDFlag := flag.String("mc-group-id", envStr("MC_GROUP_ID", "0x000B"),
+		"IANA group-id (bytes 12–13 of the IPv6 multicast address); default 0x000B (IANA Bitcoin)")
 	shardIncludeFlag := flag.String("shard-include", envStr("SHARD_INCLUDE", ""),
 		"comma-separated shard indices/ranges to subscribe (empty = all)")
 	subtreeIncludeFlag := flag.String("subtree-include", envStr("SUBTREE_INCLUDE", ""),
@@ -163,8 +161,8 @@ func Load() (*Config, error) {
 		"UDP destination port for egress multicast groups (default: same as -listen-port)")
 	flag.StringVar(&c.MCEgressScope, "mc-egress-scope", envStr("MC_EGRESS_SCOPE", ""),
 		"multicast scope for egress groups: link | site | org | global (default: same as -scope)")
-	flag.StringVar(&c.MCEgressBaseAddr, "mc-egress-base-addr", envStr("MC_EGRESS_BASE_ADDR", ""),
-		"base IPv6 for egress multicast group address space (default: same as -mc-base-addr)")
+	egressGroupIDFlag := flag.String("mc-egress-group-id", envStr("MC_EGRESS_GROUP_ID", ""),
+		"IANA group-id for egress multicast groups (default: same as -mc-group-id)")
 	flag.IntVar(&c.MCEgressHopLimit, "mc-egress-hoplimit", envInt("MC_EGRESS_HOPLIMIT", 1),
 		"IPv6 multicast hop limit for egress datagrams (IPV6_MULTICAST_HOPS)")
 	retryFlag := flag.String("retry-endpoints", envStr("RETRY_ENDPOINTS", ""),
@@ -210,13 +208,14 @@ func Load() (*Config, error) {
 		"OTLP metric export interval (ignored when OTLP_ENDPOINT is empty)")
 
 	bits := flag.Uint("shard-bits", uint(envInt("SHARD_BITS", 2)),
-		"txid prefix bit width used as the shard key (1–24); must match proxy")
+		"txid prefix bit width used as the shard key (1–15); must match proxy")
 
 	flag.Parse()
 
-	// Validate shard bit width.
-	if *bits < 1 || *bits > 24 {
-		return nil, fmt.Errorf("shard-bits must be in [1, 24], got %d", *bits)
+	// Validate shard bit width. Top of the 16-bit shard space is reserved for
+	// control-plane groups (0xFFFC–0xFFFE), so practical bits is bounded at 15.
+	if *bits < 1 || *bits > 15 {
+		return nil, fmt.Errorf("shard-bits must be in [1, 15], got %d", *bits)
 	}
 	c.ShardBits = *bits
 	c.NumGroups = 1 << c.ShardBits
@@ -228,18 +227,12 @@ func Load() (*Config, error) {
 	}
 	c.MCPrefix = prefix
 
-	// Parse base IPv6 middle bytes if provided.
-	if c.MCBaseAddr != "" {
-		ip := net.ParseIP(c.MCBaseAddr)
-		if ip == nil {
-			return nil, fmt.Errorf("invalid base IPv6 address %q", c.MCBaseAddr)
-		}
-		ip16 := ip.To16()
-		if ip16 == nil || ip.To4() != nil {
-			return nil, fmt.Errorf("base address must be IPv6, got %q", c.MCBaseAddr)
-		}
-		copy(c.MCMiddleBytes[:], ip16[2:13])
+	// Parse IANA group-id (default 0x000B = IANA Bitcoin allocation).
+	gid, err := parseGroupID(*groupIDFlag)
+	if err != nil {
+		return nil, fmt.Errorf("invalid -mc-group-id %q: %w", *groupIDFlag, err)
 	}
+	c.MCGroupID = gid
 
 	// Validate egress protocol.
 	if c.EgressProto != "udp" && c.EgressProto != "tcp" {
@@ -271,19 +264,15 @@ func Load() (*Config, error) {
 		}
 		c.MCEgressPrefix = egressPrefix
 
-		// Base address: default to ingress middle bytes.
-		if c.MCEgressBaseAddr == "" {
-			c.MCEgressMiddleBytes = c.MCMiddleBytes
+		// Group-id: default to ingress group-id.
+		if *egressGroupIDFlag == "" {
+			c.MCEgressGroupID = c.MCGroupID
 		} else {
-			ip := net.ParseIP(c.MCEgressBaseAddr)
-			if ip == nil {
-				return nil, fmt.Errorf("invalid mc-egress-base-addr %q", c.MCEgressBaseAddr)
+			egid, err := parseGroupID(*egressGroupIDFlag)
+			if err != nil {
+				return nil, fmt.Errorf("invalid -mc-egress-group-id %q: %w", *egressGroupIDFlag, err)
 			}
-			ip16 := ip.To16()
-			if ip16 == nil || ip.To4() != nil {
-				return nil, fmt.Errorf("mc-egress-base-addr must be IPv6, got %q", c.MCEgressBaseAddr)
-			}
-			copy(c.MCEgressMiddleBytes[:], ip16[2:13])
+			c.MCEgressGroupID = egid
 		}
 
 		// Port: default to listen port.
@@ -472,4 +461,26 @@ func envDuration(key string, def time.Duration) time.Duration {
 		}
 	}
 	return def
+}
+
+// parseGroupID accepts either a hex literal (0x000B, 000B) or a decimal
+// integer in the range [0, 0xFFFF].
+func parseGroupID(s string) (uint16, error) {
+	s = strings.TrimSpace(s)
+	if s == "" {
+		return 0, fmt.Errorf("empty value")
+	}
+	base := 10
+	low := strings.ToLower(s)
+	if strings.HasPrefix(low, "0x") {
+		s = s[2:]
+		base = 16
+	} else if _, err := strconv.ParseUint(s, 10, 16); err != nil {
+		base = 16
+	}
+	n, err := strconv.ParseUint(s, base, 16)
+	if err != nil {
+		return 0, err
+	}
+	return uint16(n), nil
 }

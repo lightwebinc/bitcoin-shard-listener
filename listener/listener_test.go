@@ -106,7 +106,7 @@ func buildBRC12Frame(t *testing.T, txid [32]byte, payload []byte) []byte {
 
 func newWorker(t *testing.T, addr string, filt *filter.Filter) *Worker {
 	t.Helper()
-	eng := shard.New(0xFF05, [11]byte{}, 2)
+	eng := shard.New(0xFF05, shard.DefaultGroupID, 2)
 	egr, err := egress.New(addr, "udp", false)
 	if err != nil {
 		t.Fatal(err)
@@ -194,7 +194,7 @@ func TestProcessFrame_FilterDrops(t *testing.T) {
 func TestProcessFrame_StripHeader(t *testing.T) {
 	addr, ch, cleanup := newSink(t)
 	defer cleanup()
-	eng := shard.New(0xFF05, [11]byte{}, 2)
+	eng := shard.New(0xFF05, shard.DefaultGroupID, 2)
 	egr, err := egress.New(addr, "udp", true) // strip-header
 	if err != nil {
 		t.Fatal(err)
@@ -219,7 +219,7 @@ func TestProcessFrame_StripHeader(t *testing.T) {
 }
 
 func TestNew_Construction(t *testing.T) {
-	eng := shard.New(0xFF05, [11]byte{}, 2)
+	eng := shard.New(0xFF05, shard.DefaultGroupID, 2)
 	filt := filter.New(nil, nil, nil, nil)
 	iface := loopbackIface(t)
 	w := New(7, iface, 9001, nil, eng, filt, nil, nil, nil, nil, true)

@@ -6,11 +6,11 @@
 //
 // # Address derivation (zero-alloc)
 //
-// At construction time bytes 0-12 of an address template are pre-filled
-// (scope prefix + operator middle bytes). Per-frame, only bytes 13-15 are
-// overwritten with the 24-bit group index supplied by the caller — the
-// same index already computed by the ingress worker. No heap allocations
-// occur on the hot path.
+// At construction time bytes 0-13 of an address template are pre-filled
+// (scope prefix + zero IANA boundary + 16-bit IANA group-id). Per-frame,
+// only bytes 14-15 are overwritten with the 16-bit shard group index
+// supplied by the caller — the same index already computed by the ingress
+// worker. No heap allocations occur on the hot path.
 //
 // # Socket options
 //
@@ -36,7 +36,7 @@ const mcSendBuf = 16 * 1024 * 1024 // 16 MiB; kernel silently caps at wmem_max
 // MCastSender forwards filtered frames to an IPv6 multicast address space
 // derived from the frame's shard index.
 type MCastSender struct {
-	addrTemplate [16]byte // bytes 0-12 fixed; 13-15 written per-frame
+	addrTemplate [16]byte // bytes 0-13 fixed; 14-15 written per-frame
 	egressPort   int
 	stripHeader  bool
 	fd           int
@@ -46,7 +46,7 @@ type MCastSender struct {
 // NewMCast constructs an MCastSender and opens the underlying UDP6 socket.
 //
 //   - mcPrefix is the two-byte IPv6 multicast prefix for egress groups (e.g. 0xFF02).
-//   - middleBytes are bytes 2-12 of the egress IPv6 group address (operator prefix).
+//   - groupID is the 16-bit IANA group-id occupying bytes 12–13 (default 0x000B).
 //   - shardBits is reserved for future group-subset egress; unused by current send logic.
 //   - port is the UDP destination port for egress datagrams.
 //   - iface is the network interface used for multicast send (IPV6_MULTICAST_IF).
@@ -54,7 +54,7 @@ type MCastSender struct {
 //   - stripHeader mirrors the listener-wide -strip-header flag.
 func NewMCast(
 	mcPrefix uint16,
-	middleBytes [11]byte,
+	groupID uint16,
 	_ uint, // shardBits — reserved for future group-subset egress
 	port int,
 	iface *net.Interface,
@@ -89,10 +89,12 @@ func NewMCast(
 		fd:          fd,
 		log:         slog.Default().With("component", "mc-egress"),
 	}
-	// Pre-fill fixed address bytes: scope prefix (bytes 0-1) and operator
-	// middle bytes (bytes 2-12). Bytes 13-15 are written per-frame.
+	// Pre-fill fixed address bytes: scope prefix (bytes 0-1), IANA 96-bit
+	// boundary zero-fill (bytes 2-11), and IANA group-id (bytes 12-13).
+	// Bytes 14-15 are written per-frame.
 	binary.BigEndian.PutUint16(s.addrTemplate[0:2], mcPrefix)
-	copy(s.addrTemplate[2:13], middleBytes[:])
+	// bytes 2..11 are already zero (Go zero-init)
+	binary.BigEndian.PutUint16(s.addrTemplate[12:14], groupID)
 
 	return s, nil
 }
@@ -111,8 +113,7 @@ func (s *MCastSender) Send(raw []byte, f *frame.Frame, groupIdx uint32) error {
 		buf = raw
 	}
 
-	// Write the 24-bit group index into bytes 13-15 of the address template.
-	s.addrTemplate[13] = byte(groupIdx >> 16)
+	// Write the 16-bit group index into bytes 14-15 of the address template.
 	s.addrTemplate[14] = byte(groupIdx >> 8)
 	s.addrTemplate[15] = byte(groupIdx)
 

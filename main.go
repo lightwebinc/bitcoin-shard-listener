@@ -71,7 +71,7 @@ func run() error {
 	}
 
 	// Build the shard engine.
-	engine := shard.New(cfg.MCPrefix, cfg.MCMiddleBytes, cfg.ShardBits)
+	engine := shard.New(cfg.MCPrefix, cfg.MCGroupID, cfg.ShardBits)
 
 	// Derive the multicast group addresses to join.
 	groups, err := buildGroups(cfg, engine)
@@ -129,7 +129,7 @@ func run() error {
 		var announceGroups []*net.UDPAddr
 		for _, scopeName := range cfg.AnnounceScopes {
 			scopePrefix := config.Scopes[scopeName]
-			annIP := shard.ControlGroupAddr(scopePrefix, cfg.MCMiddleBytes, shard.CtrlGroupSubtreeAnnounce)
+			annIP := shard.ControlGroupAddr(scopePrefix, cfg.MCGroupID, shard.CtrlGroupSubtreeAnnounce)
 			announceGroups = append(announceGroups, &net.UDPAddr{IP: annIP, Port: cfg.ListenPort})
 		}
 		sal := &discovery.SubtreeAnnounceListener{
@@ -161,7 +161,7 @@ func run() error {
 		if !ok {
 			beaconScopePrefix = 0xFF05
 		}
-		beaconIP := shard.ControlGroupAddr(beaconScopePrefix, cfg.MCMiddleBytes, shard.CtrlGroupBeacon)
+		beaconIP := shard.ControlGroupAddr(beaconScopePrefix, cfg.MCGroupID, shard.CtrlGroupBeacon)
 		beaconGrp := &net.UDPAddr{IP: beaconIP, Port: cfg.BeaconPort}
 		bl := &discovery.BeaconListener{
 			Registry: reg,
@@ -192,7 +192,7 @@ func run() error {
 		if cfg.MCEgressEnabled {
 			mcastEgr, err = egress.NewMCast(
 				cfg.MCEgressPrefix,
-				cfg.MCEgressMiddleBytes,
+				cfg.MCEgressGroupID,
 				cfg.ShardBits,
 				cfg.MCEgressPort,
 				cfg.MCEgressIface,
