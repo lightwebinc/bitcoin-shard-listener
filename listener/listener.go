@@ -21,6 +21,7 @@ package listener
 
 import (
 	"context"
+	"crypto/sha256"
 	"fmt"
 	"log/slog"
 	"net"
@@ -31,6 +32,7 @@ import (
 	"github.com/lightwebinc/bitcoin-shard-common/frame"
 	"github.com/lightwebinc/bitcoin-shard-common/shard"
 
+	"github.com/lightwebinc/bitcoin-shard-listener/dedup"
 	"github.com/lightwebinc/bitcoin-shard-listener/egress"
 	"github.com/lightwebinc/bitcoin-shard-listener/filter"
 	"github.com/lightwebinc/bitcoin-shard-listener/metrics"
@@ -46,18 +48,28 @@ const (
 
 // Worker is a single multicast receive goroutine.
 type Worker struct {
-	id       int
-	iface    *net.Interface
-	port     int
-	groups   []*net.UDPAddr // multicast groups to join
-	engine   *shard.Engine
-	filt     *filter.Filter
-	egr      *egress.Sender
-	mcastEgr *egress.MCastSender // nil when multicast egress is disabled
-	tracker  *nack.Tracker
-	rec      *metrics.Recorder
-	debug    bool
-	log      *slog.Logger
+	id                int
+	iface             *net.Interface
+	port              int
+	groups            []*net.UDPAddr // multicast groups to join
+	engine            *shard.Engine
+	filt              *filter.Filter
+	egr               *egress.Sender
+	mcastEgr          *egress.MCastSender // nil when multicast egress is disabled
+	tracker           *nack.Tracker
+	rec               *metrics.Recorder
+	debug             bool
+	verifyPayloadHash bool
+	dedupSet          *dedup.Set // nil = dedup disabled
+	log               *slog.Logger
+}
+
+// SetEgressDedup attaches a duplicate-suppression set keyed on
+// (groupIdx, subtreeID, CurSeq). When set, retransmits whose key was already
+// forwarded recently are dropped before egress. nil disables dedup. Defaults
+// to disabled.
+func (w *Worker) SetEgressDedup(s *dedup.Set) {
+	w.dedupSet = s
 }
 
 // New constructs a Worker. mcastEgr may be nil to disable multicast egress.
@@ -88,6 +100,14 @@ func New(
 		debug:    debug,
 		log:      slog.Default().With("component", "listener", "worker", id),
 	}
+}
+
+// SetVerifyPayloadHash toggles SHA256d(payload)==TxID verification on
+// BRC-124/BRC-128 frames. When true, frames whose payload hash does not match
+// their TxID are dropped before egress and gap tracking, and
+// bsl_frames_invalid_payload_total is incremented. Defaults to false.
+func (w *Worker) SetVerifyPayloadHash(v bool) {
+	w.verifyPayloadHash = v
 }
 
 // Run opens a SO_REUSEPORT socket, joins all multicast groups, and processes
@@ -180,6 +200,28 @@ func (w *Worker) processFrame(raw []byte) {
 		w.rec.FrameReceived(w.id, w.iface.Name, ver)
 	}
 
+	// Optional payload-hash verification (GAP-2). Only meaningful for V2
+	// frames (BRC-12 has no chain semantics; the TxID is still the BSV
+	// double-SHA256 of the payload but legacy frames are forwarded verbatim
+	// regardless). When disabled, this branch is skipped entirely.
+	if w.verifyPayloadHash && f.Version == frame.FrameVerV2 {
+		first := sha256.Sum256(f.Payload)
+		second := sha256.Sum256(first[:])
+		if second != f.TxID {
+			if w.rec != nil {
+				w.rec.FrameInvalidPayload(w.id)
+			}
+			if w.debug {
+				w.log.Debug("payload hash mismatch",
+					"txid_prefix", fmt.Sprintf("%x", f.TxID[:8]),
+					"computed_prefix", fmt.Sprintf("%x", second[:8]),
+					"payload_len", len(f.Payload),
+				)
+			}
+			return
+		}
+	}
+
 	groupIdx := w.engine.GroupIndex(&f.TxID)
 
 	if allow, reason := w.filt.Allow(groupIdx, f); !allow {
@@ -187,6 +229,24 @@ func (w *Worker) processFrame(raw []byte) {
 			w.rec.FrameDropped(w.id, reason)
 		}
 		return
+	}
+
+	// Egress duplicate suppression (GAP-3): when an inline frame and its
+	// retransmit both reach the listener (common at 1+% loss with a warm
+	// retry endpoint), forward only the first. Gap-state suppression in
+	// nack.Tracker.Observe is independent and still runs below.
+	if w.dedupSet != nil && f.Version == frame.FrameVerV2 && f.CurSeq != 0 {
+		if w.dedupSet.SeenAndAdd(dedup.Key{GroupIdx: groupIdx, SubtreeID: f.SubtreeID, CurSeq: f.CurSeq}) {
+			if w.rec != nil {
+				w.rec.FrameDeduped(w.id)
+			}
+			// Skip egress, but still let the tracker observe the frame so
+			// gap-fill / chain-tail bookkeeping stays accurate.
+			if w.tracker != nil {
+				w.tracker.Observe(groupIdx, f.SubtreeID, f.PrevSeq, f.CurSeq, f.TxID)
+			}
+			return
+		}
 	}
 
 	if err := w.egr.Send(raw, f); err != nil {
@@ -216,7 +276,7 @@ func (w *Worker) processFrame(raw []byte) {
 
 	// Gap tracking: BRC-124/BRC-128 only, CurSeq must be non-zero (proxy-stamped).
 	if w.tracker != nil && f.Version == frame.FrameVerV2 && f.CurSeq != 0 {
-		w.tracker.Observe(groupIdx, f.PrevSeq, f.CurSeq, f.TxID)
+		w.tracker.Observe(groupIdx, f.SubtreeID, f.PrevSeq, f.CurSeq, f.TxID)
 	}
 
 	if w.debug {

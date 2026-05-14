@@ -7,8 +7,35 @@ import (
 )
 
 func TestNACKSize(t *testing.T) {
-	if nack.NACKSize != 24 {
-		t.Errorf("NACKSize = %d, want 24", nack.NACKSize)
+	if nack.NACKSize != 56 {
+		t.Errorf("NACKSize = %d, want 56", nack.NACKSize)
+	}
+}
+
+func TestEncodeDecodeNACK_SubtreeID(t *testing.T) {
+	var sub [32]byte
+	for i := range sub {
+		sub[i] = byte(i + 1)
+	}
+	n := &nack.NACK{
+		MsgType:    nack.MsgTypeNACK,
+		LookupType: nack.LookupByCurSeq,
+		LookupSeq:  0x1122334455667788,
+		ChainID:    0xAABBCCDDEEFF0011,
+		SubtreeID:  sub,
+	}
+	var buf [nack.NACKSize]byte
+	nack.Encode(n, buf[:])
+
+	got, err := nack.Decode(buf[:])
+	if err != nil {
+		t.Fatalf("Decode: %v", err)
+	}
+	if got.SubtreeID != sub {
+		t.Errorf("SubtreeID = %x, want %x", got.SubtreeID, sub)
+	}
+	if got.ChainID != n.ChainID {
+		t.Errorf("ChainID = %x, want %x", got.ChainID, n.ChainID)
 	}
 }
 

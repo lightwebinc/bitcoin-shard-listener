@@ -17,6 +17,7 @@ import (
 	"github.com/lightwebinc/bitcoin-shard-common/shard"
 
 	"github.com/lightwebinc/bitcoin-shard-listener/config"
+	"github.com/lightwebinc/bitcoin-shard-listener/dedup"
 	"github.com/lightwebinc/bitcoin-shard-listener/discovery"
 	"github.com/lightwebinc/bitcoin-shard-listener/egress"
 	"github.com/lightwebinc/bitcoin-shard-listener/filter"
@@ -206,6 +207,10 @@ func run() error {
 		}
 
 		w := listener.New(i, cfg.Iface, cfg.ListenPort, groups, engine, filt, egr, mcastEgr, tracker, rec, cfg.Debug)
+		w.SetVerifyPayloadHash(cfg.VerifyPayloadHash)
+		if cfg.EgressDedupCap > 0 {
+			w.SetEgressDedup(dedup.New(cfg.EgressDedupCap, cfg.EgressDedupTTL))
+		}
 		wg.Add(1)
 		go func(worker *listener.Worker) {
 			defer wg.Done()

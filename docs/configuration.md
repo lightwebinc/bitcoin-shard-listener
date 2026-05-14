@@ -157,8 +157,12 @@ multicast delivery (requires PIM or similar on intermediate routers).
 
 Gap tracking is performed for BRC-124/BRC-128 frames where `CurSeq` (bytes 48–55) is
 non-zero. `CurSeq` is stamped in-place by the proxy as
-`XXH64(senderIPv6 ∥ groupIdx ∥ counter)`; a zero value means the proxy has not
-yet stamped the frame and gap tracking is skipped.
+`XXH64(senderIPv6 ∥ groupIdx ∥ subtreeID ∥ counter)`; a zero value means the
+proxy has not yet stamped the frame and gap tracking is skipped.
+
+When a gap is detected the listener sends a pair of 56-byte NACK datagrams
+(forward by `PrevSeq` + backward by `CurSeq`, both carrying `SubtreeID`) to
+the current endpoint in the sorted registry.
 
 ### `-retry-endpoints` / `RETRY_ENDPOINTS`
 
@@ -190,6 +194,31 @@ unrecoverable and evicted (`bsl_gaps_unrecovered_total` incremented).
 Maximum lifetime of a gap entry before it is evicted regardless of retry
 count. Set to approximately one Bitcoin block interval to avoid accumulating
 stale state across block boundaries.
+
+---
+
+## Egress Deduplication
+
+When both an inline frame **and** its retransmit arrive at the listener, the
+downstream consumer would otherwise receive the same transaction twice. Egress
+dedup suppresses the second delivery.
+
+### `-egress-dedup-cap` / `EGRESS_DEDUP_CAP` (default: `0`)
+
+Capacity of the egress dedup set (number of `(groupIdx, subtreeID, curSeq)`
+entries). `0` disables dedup entirely. A value of `65536` is sufficient for
+~10 minutes of sustained traffic at 100 TPS with 10% gap rate.
+
+### `-egress-dedup-ttl` / `EGRESS_DEDUP_TTL` (default: `5s`)
+
+TTL for entries in the egress dedup set. Frames with the same `CurSeq` seen
+within this window are suppressed. Set to at least the maximum expected
+retransmit delay (typically `nack-backoff-max` + one sweep interval = 5.1 s).
+Entries also evict on capacity overflow regardless of TTL.
+
+> **Interaction with gap tracker:** even when a duplicate is suppressed by
+> egress dedup, `nack.Tracker.Observe` is still called so gap-fill bookkeeping
+> stays accurate.
 
 ---
 

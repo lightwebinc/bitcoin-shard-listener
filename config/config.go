@@ -38,6 +38,9 @@
 //	-sender-exclude       SENDER_EXCLUDE                        IPv6 addresses/CIDRs to reject (checked before include)
 //	-workers              NUM_WORKERS          NumCPU           Receive goroutine count
 //	-debug                DEBUG                false            Per-frame logging
+//	-verify-payload-hash  VERIFY_PAYLOAD_HASH  false            Verify SHA256d(payload)==TxID on V2 frames; drop on mismatch
+//	-egress-dedup-cap     EGRESS_DEDUP_CAP     0                Egress dedup capacity (0 = disabled)
+//	-egress-dedup-ttl     EGRESS_DEDUP_TTL     2s               Egress dedup TTL (max age of a remembered key)
 //	-metrics-addr         METRICS_ADDR         :9200            Prometheus / healthz / readyz
 //	-drain-timeout        DRAIN_TIMEOUT        0s               Pre-shutdown drain window
 //	-instance             INSTANCE_ID          hostname         OTel service.instance.id
@@ -117,9 +120,12 @@ type Config struct {
 	SenderExclude          []*net.IPNet // checked before include
 
 	// Runtime
-	NumWorkers   int
-	Debug        bool
-	DrainTimeout time.Duration
+	NumWorkers        int
+	Debug             bool
+	VerifyPayloadHash bool
+	EgressDedupCap    int           // 0 = disabled
+	EgressDedupTTL    time.Duration // max age of a remembered key
+	DrainTimeout      time.Duration
 
 	// Observability
 	MetricsAddr  string
@@ -196,6 +202,12 @@ func Load() (*Config, error) {
 		"number of worker goroutines (0 = runtime.NumCPU)")
 	flag.BoolVar(&c.Debug, "debug", envBool("DEBUG", false),
 		"enable per-frame debug logging")
+	flag.BoolVar(&c.VerifyPayloadHash, "verify-payload-hash", envBool("VERIFY_PAYLOAD_HASH", false),
+		"verify SHA256d(payload) == TxID on BRC-124/BRC-128 frames; drop on mismatch")
+	flag.IntVar(&c.EgressDedupCap, "egress-dedup-cap", envInt("EGRESS_DEDUP_CAP", 0),
+		"egress duplicate-suppression capacity (0 = disabled); typical value: workers × tps × dedup-ttl")
+	flag.DurationVar(&c.EgressDedupTTL, "egress-dedup-ttl", envDuration("EGRESS_DEDUP_TTL", 2*time.Second),
+		"egress dedup TTL: max age of a remembered (groupIdx, subtreeID, CurSeq) tuple")
 	flag.DurationVar(&c.DrainTimeout, "drain-timeout", envDuration("DRAIN_TIMEOUT", 0),
 		"pre-drain delay before closing sockets; /readyz returns 503 during this window (0 = disabled)")
 	flag.StringVar(&c.MetricsAddr, "metrics-addr", envStr("METRICS_ADDR", ":9200"),

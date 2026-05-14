@@ -1,6 +1,7 @@
 package listener
 
 import (
+	"crypto/sha256"
 	"net"
 	"testing"
 	"time"
@@ -8,9 +9,16 @@ import (
 	"github.com/lightwebinc/bitcoin-shard-common/frame"
 	"github.com/lightwebinc/bitcoin-shard-common/shard"
 
+	"github.com/lightwebinc/bitcoin-shard-listener/dedup"
 	"github.com/lightwebinc/bitcoin-shard-listener/egress"
 	"github.com/lightwebinc/bitcoin-shard-listener/filter"
 )
+
+// sha256d returns the BSV double-SHA256 of buf.
+func sha256d(buf []byte) [32]byte {
+	first := sha256.Sum256(buf)
+	return sha256.Sum256(first[:])
+}
 
 // newSink starts a UDP listener on loopback and returns its addr + a channel of received payloads.
 func newSink(t *testing.T) (string, <-chan []byte, func()) {
@@ -75,6 +83,22 @@ func buildBRC124Frame(t *testing.T, txid [32]byte, payload []byte) []byte {
 	f := &frame.Frame{
 		Version: frame.FrameVerV2,
 		TxID:    txid,
+		Payload: payload,
+	}
+	buf := make([]byte, frame.HeaderSize+len(payload))
+	n, err := frame.Encode(f, buf)
+	if err != nil {
+		t.Fatal(err)
+	}
+	return buf[:n]
+}
+
+func buildSequencedFrame(t *testing.T, txid [32]byte, payload []byte, curSeq uint64) []byte {
+	t.Helper()
+	f := &frame.Frame{
+		Version: frame.FrameVerV2,
+		TxID:    txid,
+		CurSeq:  curSeq,
 		Payload: payload,
 	}
 	buf := make([]byte, frame.HeaderSize+len(payload))
@@ -215,6 +239,144 @@ func TestProcessFrame_StripHeader(t *testing.T) {
 		}
 	case <-time.After(time.Second):
 		t.Fatal("timeout")
+	}
+}
+
+func TestProcessFrame_EgressDedup_SuppressDuplicate(t *testing.T) {
+	addr, ch, cleanup := newSink(t)
+	defer cleanup()
+	filt := filter.New(nil, nil, nil, nil)
+	w := newWorker(t, addr, filt)
+	w.SetEgressDedup(dedup.New(64, time.Second))
+
+	payload := []byte("dup-payload")
+	txid := sha256d(payload)
+	raw := buildSequencedFrame(t, txid, payload, 0xDEADBEEF_CAFEBABE)
+
+	// First delivery: must forward.
+	w.processFrame(raw)
+	select {
+	case <-ch:
+	case <-time.After(time.Second):
+		t.Fatal("first delivery should forward")
+	}
+
+	// Second delivery (retransmit): must be suppressed.
+	w.processFrame(raw)
+	select {
+	case <-ch:
+		t.Fatal("duplicate delivery must be suppressed by egress dedup")
+	case <-time.After(150 * time.Millisecond):
+		// expected
+	}
+}
+
+func TestProcessFrame_EgressDedup_Disabled_ForwardsBoth(t *testing.T) {
+	addr, ch, cleanup := newSink(t)
+	defer cleanup()
+	filt := filter.New(nil, nil, nil, nil)
+	w := newWorker(t, addr, filt)
+	// No dedup set — both copies must reach downstream.
+
+	raw := buildBRC124Frame(t, [32]byte{0x11}, []byte("no-dedup"))
+	w.processFrame(raw)
+	w.processFrame(raw)
+
+	count := 0
+	deadline := time.After(300 * time.Millisecond)
+	for {
+		select {
+		case <-ch:
+			count++
+		case <-deadline:
+			goto done
+		}
+	}
+done:
+	if count != 2 {
+		t.Errorf("without dedup: expected 2 forwards, got %d", count)
+	}
+}
+
+func TestProcessFrame_VerifyDisabled_ForwardsCorrupted(t *testing.T) {
+	addr, ch, cleanup := newSink(t)
+	defer cleanup()
+	filt := filter.New(nil, nil, nil, nil)
+	w := newWorker(t, addr, filt)
+	// Default: verifyPayloadHash == false. Mismatched TxID must still forward.
+
+	raw := buildBRC124Frame(t, [32]byte{0xAA, 0xBB, 0xCC}, []byte("payload"))
+	w.processFrame(raw)
+
+	select {
+	case got := <-ch:
+		if len(got) != len(raw) {
+			t.Fatalf("got %d bytes want %d", len(got), len(raw))
+		}
+	case <-time.After(time.Second):
+		t.Fatal("verify-disabled: expected forward despite TxID mismatch")
+	}
+}
+
+func TestProcessFrame_VerifyEnabled_RejectsCorrupted(t *testing.T) {
+	addr, ch, cleanup := newSink(t)
+	defer cleanup()
+	filt := filter.New(nil, nil, nil, nil)
+	w := newWorker(t, addr, filt)
+	w.SetVerifyPayloadHash(true)
+
+	// TxID does NOT match SHA256d(payload).
+	raw := buildBRC124Frame(t, [32]byte{0xAA, 0xBB, 0xCC}, []byte("corrupt"))
+	w.processFrame(raw)
+
+	select {
+	case <-ch:
+		t.Fatal("verify-enabled: corrupted frame must be dropped")
+	case <-time.After(150 * time.Millisecond):
+		// expected: silently dropped before egress
+	}
+}
+
+func TestProcessFrame_VerifyEnabled_AcceptsValid(t *testing.T) {
+	addr, ch, cleanup := newSink(t)
+	defer cleanup()
+	filt := filter.New(nil, nil, nil, nil)
+	w := newWorker(t, addr, filt)
+	w.SetVerifyPayloadHash(true)
+
+	payload := []byte("the-real-payload")
+	txid := sha256d(payload)
+	raw := buildBRC124Frame(t, txid, payload)
+	w.processFrame(raw)
+
+	select {
+	case got := <-ch:
+		if len(got) != len(raw) {
+			t.Fatalf("got %d bytes want %d", len(got), len(raw))
+		}
+	case <-time.After(time.Second):
+		t.Fatal("verify-enabled: valid frame must forward")
+	}
+}
+
+func TestProcessFrame_VerifyEnabled_BRC12Bypassed(t *testing.T) {
+	addr, ch, cleanup := newSink(t)
+	defer cleanup()
+	filt := filter.New(nil, nil, nil, nil)
+	w := newWorker(t, addr, filt)
+	w.SetVerifyPayloadHash(true)
+
+	// BRC-12 frames are forwarded verbatim regardless of verify flag.
+	raw := buildBRC12Frame(t, [32]byte{0x01, 0x02}, []byte("legacy"))
+	w.processFrame(raw)
+
+	select {
+	case got := <-ch:
+		if len(got) != len(raw) {
+			t.Fatalf("got %d bytes want %d", len(got), len(raw))
+		}
+	case <-time.After(time.Second):
+		t.Fatal("BRC-12 must be forwarded even when verify is enabled")
 	}
 }
 

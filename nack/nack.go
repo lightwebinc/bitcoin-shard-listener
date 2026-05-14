@@ -48,13 +48,22 @@ type gapEntry struct {
 	leftBoundary uint64 // forward NACK target: LookupByPrevSeq; 0 = unknown
 	chainID      uint64 // 0 = unattributed
 	groupIdx     uint32
+	subtreeID    [32]byte // namespace for the lookup at the retry endpoint
 	retries      int
 	nextAttempt  time.Time
 	deadline     time.Time // absolute eviction deadline
 	endpointIdx  int       // round-robin index into registry snapshot
 }
 
-// groupState holds all chains and pending gaps for one groupIdx.
+// trackerKey identifies one (groupIdx, subtreeID) namespace within the
+// per-shard gap tracker. Sequence chains are independent across subtrees so
+// state must not be shared.
+type trackerKey struct {
+	groupIdx  uint32
+	subtreeID [32]byte
+}
+
+// groupState holds all chains and pending gaps for one (groupIdx, subtreeID).
 type groupState struct {
 	tails   map[uint64]*chainTail // keyed by chainTail.lastCurSeq
 	pending map[uint64]*gapEntry  // keyed by gapEntry.curSeq
@@ -72,7 +81,7 @@ type Tracker struct {
 	maxConcurrent int           // semaphore bound for concurrent sendNACK goroutines
 
 	mu     sync.Mutex
-	states map[uint32]*groupState // keyed by groupIdx
+	states map[trackerKey]*groupState // keyed by (groupIdx, subtreeID)
 
 	// nackQueue receives gap entries ready for NACK dispatch.
 	nackQueue chan *gapEntry
@@ -103,7 +112,7 @@ func New(cfg TrackerConfig, retryEndpoints []string, iface *net.Interface, rec *
 		registry:      registry,
 		respTimeout:   defaultRespTimeout,
 		maxConcurrent: defaultMaxConcurrent,
-		states:        make(map[uint32]*groupState),
+		states:        make(map[trackerKey]*groupState),
 		nackQueue:     make(chan *gapEntry, 4096),
 		sem:           make(chan struct{}, defaultMaxConcurrent),
 	}
@@ -113,6 +122,10 @@ func New(cfg TrackerConfig, retryEndpoints []string, iface *net.Interface, rec *
 // It detects chain breaks via tail matching and schedules NACKs.
 // curSeq == 0 means the proxy has not yet stamped the frame; it is ignored.
 //
+// State is tracked per (groupIdx, subtreeID) because chains are subtree-scoped
+// (BRC-124 §1.2): a gap in subtree A must not affect subtree B's chain even
+// when both share a multicast group.
+//
 // Processing steps:
 //  1. Skip unstamped frames (curSeq == 0).
 //  2. Fill check: if curSeq matches a pending gap key, close it.
@@ -120,7 +133,7 @@ func New(cfg TrackerConfig, retryEndpoints []string, iface *net.Interface, rec *
 //  4. New chain start: if prevSeq == 0, register a new attributed tail.
 //  5. Chain extension: if prevSeq matches a known tail, advance it and cascade-merge orphans.
 //  6. Gap detected: prevSeq matches no tail — register a gap entry and create an orphan tail.
-func (t *Tracker) Observe(groupIdx uint32, prevSeq, curSeq uint64, txid [32]byte) {
+func (t *Tracker) Observe(groupIdx uint32, subtreeID [32]byte, prevSeq, curSeq uint64, txid [32]byte) {
 	if curSeq == 0 {
 		return
 	}
@@ -130,13 +143,14 @@ func (t *Tracker) Observe(groupIdx uint32, prevSeq, curSeq uint64, txid [32]byte
 
 	now := time.Now()
 
-	st, ok := t.states[groupIdx]
+	key := trackerKey{groupIdx: groupIdx, subtreeID: subtreeID}
+	st, ok := t.states[key]
 	if !ok {
 		st = &groupState{
 			tails:   make(map[uint64]*chainTail),
 			pending: make(map[uint64]*gapEntry),
 		}
-		t.states[groupIdx] = st
+		t.states[key] = st
 	}
 
 	// Step 2: fill check — close any pending gap whose key equals curSeq.
@@ -195,6 +209,7 @@ func (t *Tracker) Observe(groupIdx uint32, prevSeq, curSeq uint64, txid [32]byte
 			curSeq:       gapKey,
 			leftBoundary: leftBoundary,
 			groupIdx:     groupIdx,
+			subtreeID:    subtreeID,
 			nextAttempt:  now.Add(jitter),
 			deadline:     now.Add(t.cfg.GapTTL),
 		}
@@ -233,15 +248,16 @@ func (t *Tracker) cascadeMerge(st *groupState, chainID, newTailCurSeq uint64) {
 }
 
 // Fill cancels a pending gap when a retransmitted frame arrives via multicast
-// with the given (groupIdx, curSeq). This is a lighter-weight path for callers
-// that do not have the full frame; Observe handles the same fill check
-// automatically when the retransmit is processed as a regular frame.
-func (t *Tracker) Fill(groupIdx uint32, curSeq uint64) {
+// with the given (groupIdx, subtreeID, curSeq). This is a lighter-weight path
+// for callers that do not have the full frame; Observe handles the same fill
+// check automatically when the retransmit is processed as a regular frame.
+func (t *Tracker) Fill(groupIdx uint32, subtreeID [32]byte, curSeq uint64) {
 	if curSeq == 0 {
 		return
 	}
 	t.mu.Lock()
-	if st, ok := t.states[groupIdx]; ok {
+	key := trackerKey{groupIdx: groupIdx, subtreeID: subtreeID}
+	if st, ok := t.states[key]; ok {
 		if _, found := st.pending[curSeq]; found {
 			delete(st.pending, curSeq)
 			if t.rec != nil {
@@ -283,7 +299,7 @@ func (t *Tracker) sweepOnce(now time.Time) {
 		tailTTL = t.cfg.GapTTL
 	}
 
-	for groupIdx, st := range t.states {
+	for tk, st := range t.states {
 		for key, e := range st.pending {
 			if now.After(e.deadline) {
 				delete(st.pending, key)
@@ -291,7 +307,7 @@ func (t *Tracker) sweepOnce(now time.Time) {
 					t.rec.GapUnrecovered()
 				}
 				t.log.Debug("gap evicted (TTL)",
-					"group", groupIdx,
+					"group", tk.groupIdx,
 					"cur_seq", e.curSeq,
 				)
 				continue
@@ -302,7 +318,7 @@ func (t *Tracker) sweepOnce(now time.Time) {
 					t.rec.GapUnrecovered()
 				}
 				t.log.Debug("gap evicted (retries)",
-					"group", groupIdx,
+					"group", tk.groupIdx,
 					"cur_seq", e.curSeq,
 				)
 				continue
@@ -326,7 +342,7 @@ func (t *Tracker) sweepOnce(now time.Time) {
 			if now.Sub(tail.lastSeen) > tailTTL {
 				delete(st.tails, curSeq)
 				t.log.Debug("tail evicted (TTL)",
-					"group", groupIdx,
+					"group", tk.groupIdx,
 					"chain_id", tail.chainID,
 					"last_cur_seq", tail.lastCurSeq,
 				)
@@ -334,7 +350,7 @@ func (t *Tracker) sweepOnce(now time.Time) {
 		}
 
 		if len(st.pending) == 0 && len(st.tails) == 0 {
-			delete(t.states, groupIdx)
+			delete(t.states, tk)
 		}
 	}
 }
@@ -403,14 +419,14 @@ func (t *Tracker) sendNACK(e *gapEntry) {
 
 	// Backward NACK: find frame whose CurSeq == e.curSeq.
 	var bwdBuf [NACKSize]byte
-	Encode(&NACK{MsgType: MsgTypeNACK, LookupType: LookupByCurSeq, LookupSeq: e.curSeq, ChainID: e.chainID}, bwdBuf[:])
+	Encode(&NACK{MsgType: MsgTypeNACK, LookupType: LookupByCurSeq, LookupSeq: e.curSeq, ChainID: e.chainID, SubtreeID: e.subtreeID}, bwdBuf[:])
 	_, _ = conn.WriteTo(bwdBuf[:], addr)
 
 	// Forward NACK: sent only when leftBoundary is known (single-sender or
 	// after chain reconnection). Finds the frame whose PrevSeq == leftBoundary.
 	if e.leftBoundary != 0 {
 		var fwdBuf [NACKSize]byte
-		Encode(&NACK{MsgType: MsgTypeNACK, LookupType: LookupByPrevSeq, LookupSeq: e.leftBoundary, ChainID: e.chainID}, fwdBuf[:])
+		Encode(&NACK{MsgType: MsgTypeNACK, LookupType: LookupByPrevSeq, LookupSeq: e.leftBoundary, ChainID: e.chainID, SubtreeID: e.subtreeID}, fwdBuf[:])
 		_, _ = conn.WriteTo(fwdBuf[:], addr)
 	}
 
@@ -471,7 +487,8 @@ func (t *Tracker) advanceEndpoint(e *gapEntry, immediate bool, numEndpoints int)
 	t.mu.Lock()
 	defer t.mu.Unlock()
 
-	st, ok := t.states[e.groupIdx]
+	key := trackerKey{groupIdx: e.groupIdx, subtreeID: e.subtreeID}
+	st, ok := t.states[key]
 	if !ok {
 		return
 	}
@@ -508,11 +525,12 @@ func (t *Tracker) PendingGaps() int {
 }
 
 // GapLeftBoundary returns the leftBoundary stored for the gap entry identified
-// by (groupIdx, gapCurSeq). Returns 0 if the gap does not exist. For testing.
-func (t *Tracker) GapLeftBoundary(groupIdx uint32, gapCurSeq uint64) uint64 {
+// by (groupIdx, subtreeID, gapCurSeq). Returns 0 if the gap does not exist. For testing.
+func (t *Tracker) GapLeftBoundary(groupIdx uint32, subtreeID [32]byte, gapCurSeq uint64) uint64 {
 	t.mu.Lock()
 	defer t.mu.Unlock()
-	if st, ok := t.states[groupIdx]; ok {
+	key := trackerKey{groupIdx: groupIdx, subtreeID: subtreeID}
+	if st, ok := t.states[key]; ok {
 		if e, ok := st.pending[gapCurSeq]; ok {
 			return e.leftBoundary
 		}
@@ -537,7 +555,8 @@ func (t *Tracker) cancelGap(e *gapEntry) {
 	t.mu.Lock()
 	defer t.mu.Unlock()
 
-	if st, ok := t.states[e.groupIdx]; ok {
+	key := trackerKey{groupIdx: e.groupIdx, subtreeID: e.subtreeID}
+	if st, ok := t.states[key]; ok {
 		if _, found := st.pending[e.curSeq]; found {
 			delete(st.pending, e.curSeq)
 			if t.rec != nil {

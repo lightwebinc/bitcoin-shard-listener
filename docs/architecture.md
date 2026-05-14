@@ -68,19 +68,23 @@ Offset  Size  Align  Field          Value / notes
 ```
 
 `PrevSeq` and `CurSeq` form a hash chain: each frame's `PrevSeq` equals the
-`CurSeq` of its predecessor in the sender's per-(sender IP, group) sequence.
-Both are computed by the proxy (`bitcoin-shard-proxy`) as
-`XXH64(senderIPv6 ∥ groupIdx ∥ monotonicCounter)` and stamped in-place before
-multicast forwarding. Senders (generators) set both to zero. Gap tracking is
-skipped when `CurSeq` is zero.
+`CurSeq` of its predecessor in the sender's per-(sender IP, group, subtree)
+sequence. Both are computed by the proxy (`bitcoin-shard-proxy`) as
+`XXH64(senderIPv6 ∥ groupIdx ∥ subtreeID ∥ monotonicCounter)` and stamped
+in-place before multicast forwarding. Senders (generators) set both to zero.
+Gap tracking is skipped when `CurSeq` is zero.
 
 ## Gap tracking (NACK / NORM-inspired)
 
-State key: `groupIdx`. Per-group state:
-- `lastCurSeq`: the highest `CurSeq` seen so far for this group.
+State key: `(groupIdx, subtreeID)`. Per-chain state:
+- `lastCurSeq`: the highest `CurSeq` seen so far for this chain.
 - `pending`: map from `CurSeq` of the last-in-gap frame to a `gapEntry`.
 
-**Gap detection** (`nack.Tracker.Observe(groupIdx, prevSeq, curSeq, txID)`):
+Scoping by `subtreeID` ensures sequence chains from different subtrees (batch
+identifiers) are tracked independently; a gap in one subtree does not affect
+another subtree's chain tail.
+
+**Gap detection** (`nack.Tracker.Observe(groupIdx, subtreeID, prevSeq, curSeq, txID)`):
 - If `prevSeq != 0` and `prevSeq > lastCurSeq`: a gap exists (frames with
   `CurSeq` in `(lastCurSeq, prevSeq]` are missing). A `gapEntry` is added to
   `pending` keyed by `prevSeq`.
@@ -90,7 +94,7 @@ State key: `groupIdx`. Per-group state:
   accepted; they never create new gap entries and never regress `lastCurSeq`.
 - `lastCurSeq` only advances forward.
 
-**Gap fill** (`nack.Tracker.Fill(groupIdx, curSeq)`):
+**Gap fill** (`nack.Tracker.Fill(groupIdx, subtreeID, curSeq)`):
 - Called when a retransmit arrives via a NACK ACK response. Deletes the
   matching `pending` entry and increments `bsl_gaps_suppressed_total`.
 
@@ -100,8 +104,9 @@ State key: `groupIdx`. Per-group state:
 - Entries past `nextAttempt` with `retries < nack-max-retries` are enqueued
   on `nackQueue`. `nextAttempt` is advanced immediately before enqueue to
   prevent the same gap from being re-dispatched before a response arrives.
-- `nackQueue` consumers send 24-byte NACK datagrams (forward by `PrevSeq` +
-  backward by `CurSeq`) to the current endpoint in the sorted registry.
+- `nackQueue` consumers send 56-byte NACK datagrams (forward by `PrevSeq` +
+  backward by `CurSeq`, both carrying `SubtreeID`) to the current endpoint
+  in the sorted registry.
 
 **NACK escalation** on endpoint response:
 - **ACK**: gap is cancelled (`Fill`); `bsl_gaps_suppressed_total` incremented.
@@ -148,6 +153,27 @@ BRC-12 frames are decoded with zero-valued `PrevSeq`, `CurSeq`, and `SubtreeID`.
 Shard filtering applies to BRC-12 frames normally; subtree filtering has no effect
 (zero `SubtreeID` passes all include/exclude checks). Gap tracking is skipped
 for BRC-12 frames because `CurSeq` is zero.
+
+## Egress deduplication
+
+When `-egress-dedup-cap` is non-zero, each worker maintains a fixed-capacity
+TTL-bounded set of recently-seen `(groupIdx, subtreeID, curSeq)` keys.
+Before forwarding a BRC-124/BRC-128 frame with a non-zero `CurSeq`, the worker
+checks the set:
+
+- **First occurrence** — key is inserted; frame is forwarded normally.
+- **Duplicate** — key is already present (inline frame and its retransmit both
+  arrived); frame is discarded; `bsl_frames_deduped_total` is incremented.
+  `nack.Tracker.Observe` still runs so gap-fill bookkeeping stays accurate.
+
+The set is a ring-buffer + hash-map with O(1) insert and lookup. Entries expire
+after `-egress-dedup-ttl` (default 5 s). When the capacity is reached the
+oldest entry is evicted regardless of TTL. BRC-12 frames and unstamped
+BRC-124/BRC-128 frames (`CurSeq == 0`) bypass dedup entirely.
+
+> **Multicast receive:** set `NUM_WORKERS=1` when receiving multicast. Each
+> additional worker holds an independent dedup set; duplicates from multiple
+> workers are not cross-suppressed.
 
 ## Egress
 

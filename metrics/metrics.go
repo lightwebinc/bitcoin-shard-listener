@@ -44,10 +44,12 @@ type Recorder struct {
 	shutdownFn func(context.Context) error
 
 	// Ingress counters
-	framesReceived  metric.Int64Counter // by worker, iface, version
-	framesDropped   metric.Int64Counter // by reason
-	framesForwarded metric.Int64Counter // by worker, proto
-	egressErrors    metric.Int64Counter
+	framesReceived       metric.Int64Counter // by worker, iface, version
+	framesDropped        metric.Int64Counter // by reason
+	framesForwarded      metric.Int64Counter // by worker, proto
+	framesInvalidPayload metric.Int64Counter // by worker; SHA256d(payload) != TxID
+	framesDeduped        metric.Int64Counter // by worker; suppressed retransmit before egress
+	egressErrors         metric.Int64Counter
 
 	// Multicast egress counters
 	mcEgressErrors metric.Int64Counter
@@ -160,6 +162,14 @@ func New(instanceID string, numWorkers int, otlpEndpoint string, otlpInterval ti
 		metric.WithDescription("Frames forwarded to downstream unicast")); err != nil {
 		return nil, err
 	}
+	if r.framesInvalidPayload, err = meter.Int64Counter("bsl_frames_invalid_payload_total",
+		metric.WithDescription("BRC-124/BRC-128 frames dropped because SHA256d(payload) != TxID")); err != nil {
+		return nil, err
+	}
+	if r.framesDeduped, err = meter.Int64Counter("bsl_frames_deduped_total",
+		metric.WithDescription("BRC-124/BRC-128 retransmits suppressed before egress (egress dedup)")); err != nil {
+		return nil, err
+	}
 	if r.egressErrors, err = meter.Int64Counter("bsl_egress_errors_total",
 		metric.WithDescription("Errors sending to downstream")); err != nil {
 		return nil, err
@@ -259,6 +269,25 @@ func (r *Recorder) FrameForwarded(workerID int, proto string) {
 	r.framesForwarded.Add(context.Background(), 1, metric.WithAttributes(
 		attribute.Int("worker", workerID),
 		attribute.String("proto", proto),
+	))
+}
+
+// FrameInvalidPayload records a BRC-124/BRC-128 frame dropped because
+// SHA256d(payload) did not match the frame's TxID. Only emitted when
+// payload-hash verification is enabled on the worker.
+func (r *Recorder) FrameInvalidPayload(workerID int) {
+	r.framesInvalidPayload.Add(context.Background(), 1, metric.WithAttributes(
+		attribute.Int("worker", workerID),
+	))
+}
+
+// FrameDeduped records a BRC-124/BRC-128 retransmit suppressed before egress
+// because the (groupIdx, subtreeID, CurSeq) tuple was already forwarded
+// recently. The gap-state suppression metric (GapSuppressed) is a separate
+// signal: it tracks gap-tracker fills, not egress dedup.
+func (r *Recorder) FrameDeduped(workerID int) {
+	r.framesDeduped.Add(context.Background(), 1, metric.WithAttributes(
+		attribute.Int("worker", workerID),
 	))
 }
 

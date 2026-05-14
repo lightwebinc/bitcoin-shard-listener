@@ -1,8 +1,8 @@
 // Package nack implements NORM-inspired multicast gap recovery for
-// bitcoin-shard-listener. This file defines the 24-byte NACK request wire
+// bitcoin-shard-listener. This file defines the 56-byte NACK request wire
 // format and the 16-byte ACK/MISS response wire format.
 //
-// # NACK datagram (UDP, 24 bytes, 8-byte aligned)
+// # NACK datagram (UDP, 56 bytes, 8-byte aligned)
 //
 //	Offset  Size  Field
 //	------  ----  -----
@@ -12,14 +12,20 @@
 //	     7     1  LookupType: 0x00 = by PrevSeq, 0x01 = by CurSeq
 //	     8     8  LookupSeq (uint64 BE) — hash value to look up
 //	    16     8  ChainID (uint64 BE) — initial CurSeq of the chain; 0 = gap not yet chain-attributed
+//	    24    32  SubtreeID — 32-byte BRC-124 subtree identifier; all-zero = no subtree
 //
 // LookupType 0x00 (by PrevSeq): the retry endpoint searches its secondary
-// index for a frame whose PrevSeq == LookupSeq, returning the frame that
-// immediately follows the last known good frame in the chain.
+// index (scoped by SubtreeID) for a frame whose PrevSeq == LookupSeq,
+// returning the frame that immediately follows the last known good frame in
+// the chain.
 //
 // LookupType 0x01 (by CurSeq): the retry endpoint searches its primary index
-// for a frame whose CurSeq == LookupSeq, returning the last frame before the
-// gap as seen by the receiver.
+// (scoped by SubtreeID) for a frame whose CurSeq == LookupSeq, returning the
+// last frame before the gap as seen by the receiver.
+//
+// SubtreeID disambiguates LookupSeq across subtree namespaces — within a
+// shard group, sequence chains run per-subtree (BRC-124 §1.2), so the same
+// hash value can legally appear under different subtrees.
 //
 // Dispatching both lookup types in parallel enables recovery of both ends of
 // a multi-frame gap in a single round-trip.
@@ -42,7 +48,7 @@ import (
 
 const (
 	// NACKSize is the fixed size of a NACK datagram in bytes.
-	NACKSize = 24
+	NACKSize = 56
 
 	// MsgTypeNACK identifies a gap-retransmission request.
 	MsgTypeNACK byte = 0x10
@@ -79,12 +85,13 @@ var (
 	ErrBadResponse = errors.New("nack: invalid response datagram")
 )
 
-// NACK is the in-memory representation of a 24-byte NACK datagram.
+// NACK is the in-memory representation of a 56-byte NACK datagram.
 type NACK struct {
-	MsgType    byte   // MsgTypeNACK
-	LookupType byte   // LookupByPrevSeq or LookupByCurSeq
-	LookupSeq  uint64 // XXH64 value to look up
-	ChainID    uint64 // initial CurSeq of the chain; 0 = gap not yet attributed to a chain
+	MsgType    byte     // MsgTypeNACK
+	LookupType byte     // LookupByPrevSeq or LookupByCurSeq
+	LookupSeq  uint64   // XXH64 value to look up
+	ChainID    uint64   // initial CurSeq of the chain; 0 = gap not yet attributed to a chain
+	SubtreeID  [32]byte // BRC-124 subtree namespace; all-zero = no subtree
 }
 
 // Encode serialises n into buf (must be at least [NACKSize] bytes).
@@ -96,6 +103,7 @@ func Encode(n *NACK, buf []byte) {
 	buf[7] = n.LookupType
 	binary.BigEndian.PutUint64(buf[8:16], n.LookupSeq)
 	binary.BigEndian.PutUint64(buf[16:24], n.ChainID)
+	copy(buf[24:56], n.SubtreeID[:])
 }
 
 // Decode parses a NACK datagram from buf.
@@ -112,12 +120,14 @@ func Decode(buf []byte) (*NACK, error) {
 	if mt != MsgTypeNACK {
 		return nil, ErrBadNACK
 	}
-	return &NACK{
+	n := &NACK{
 		MsgType:    mt,
 		LookupType: buf[7],
 		LookupSeq:  binary.BigEndian.Uint64(buf[8:16]),
 		ChainID:    binary.BigEndian.Uint64(buf[16:24]),
-	}, nil
+	}
+	copy(n.SubtreeID[:], buf[24:56])
+	return n, nil
 }
 
 // Response is the in-memory representation of a 16-byte MISS or ACK response.
