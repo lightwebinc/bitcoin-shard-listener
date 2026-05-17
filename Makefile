@@ -8,7 +8,7 @@ PROXY_DIR := ../bitcoin-shard-proxy
 PROXY_BIN := $(PROXY_DIR)/bitcoin-shard-proxy
 SEND_BIN  := $(PROXY_DIR)/send-test-frames
 
-.PHONY: all build test test-e2e lint clean docker FORCE
+.PHONY: all build test test-e2e lint hooks clean docker FORCE
 
 all: build
 
@@ -38,6 +38,10 @@ test-e2e: $(BINARY) $(SINK) $(SEND_BIN)
 
 lint:
 	golangci-lint run ./...
+
+hooks:
+	git config core.hooksPath .githooks
+	@echo "pre-commit hook installed (git config core.hooksPath .githooks)"
 
 clean:
 	rm -rf $(BUILD_DIR) $(BINARY) $(SINK)
