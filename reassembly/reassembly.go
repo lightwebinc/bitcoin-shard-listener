@@ -52,28 +52,28 @@ type Callback func(payload []byte, f *frame.Frame)
 
 // Buffer holds in-progress BRC-130 reassembly slots.
 type Buffer struct {
-	mu           sync.Mutex
-	slots        map[[32]byte]*slot
-	insertOrder  [][32]byte // eviction order (FIFO)
-	maxSlots     int
-	ttl          time.Duration
-	verifyHash   bool
-	onComplete   Callback
-	onAbandoned  func()       // metrics hook: one call per evicted slot
-	onStarted    func()       // metrics hook
-	onHashMismatch func()     // metrics hook
+	mu             sync.Mutex
+	slots          map[[32]byte]*slot
+	insertOrder    [][32]byte // eviction order (FIFO)
+	maxSlots       int
+	ttl            time.Duration
+	verifyHash     bool
+	onComplete     Callback
+	onAbandoned    func() // metrics hook: one call per evicted slot
+	onStarted      func() // metrics hook
+	onHashMismatch func() // metrics hook
 }
 
 // slot holds the fragments received so far for one TxID.
 type slot struct {
 	txID           [32]byte
 	subtreeID      [32]byte
-	hashKey        uint64   // from the first fragment received
-	seqNum         uint64   // from the first fragment received
+	hashKey        uint64 // from the first fragment received
+	seqNum         uint64 // from the first fragment received
 	origPayloadLen uint32
 	fragTotal      uint16
-	received       uint16         // count of distinct fragments received
-	frags          [][]byte       // indexed by FragIndex; nil = not yet received
+	received       uint16   // count of distinct fragments received
+	frags          [][]byte // indexed by FragIndex; nil = not yet received
 	deadline       time.Time
 }
 
@@ -91,11 +91,11 @@ func New(maxSlots int, ttl time.Duration, verifyHash bool, cb Callback) *Buffer 
 		ttl = DefaultTTL
 	}
 	return &Buffer{
-		slots:    make(map[[32]byte]*slot, maxSlots),
-		maxSlots: maxSlots,
-		ttl:      ttl,
+		slots:      make(map[[32]byte]*slot, maxSlots),
+		maxSlots:   maxSlots,
+		ttl:        ttl,
 		verifyHash: verifyHash,
-		onComplete:  cb,
+		onComplete: cb,
 	}
 }
 
@@ -288,11 +288,6 @@ func (b *Buffer) Purge() {
 	}
 	b.insertOrder = b.insertOrder[:0]
 }
-
-// frameError implements error for format messages without fmt dependency at runtime.
-type frameError string
-
-func (e frameError) Error() string { return string(e) }
 
 // validateFragment is a guard used by tests to verify fragment metadata.
 func validateFragment(ff *frame.FragFrame) error {
