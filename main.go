@@ -233,6 +233,20 @@ func run() error {
 				slog.Error("worker exited with error", "err", err)
 			}
 		}(w)
+		wg.Add(1)
+		go func(b *reassembly.Buffer) {
+			defer wg.Done()
+			t := time.NewTicker(time.Second)
+			defer t.Stop()
+			for {
+				select {
+				case <-ctx.Done():
+					return
+				case <-t.C:
+					b.Tick()
+				}
+			}
+		}(buf)
 	}
 
 	// Wait for signal.

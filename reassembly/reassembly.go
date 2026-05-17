@@ -268,6 +268,16 @@ func (b *Buffer) Stats() (activeSlots int) {
 	return
 }
 
+// Tick evicts all slots whose TTL has expired. It is safe to call from a
+// background goroutine; it acquires the buffer's mutex and returns quickly.
+// Calling Tick periodically (e.g., every second) prevents lazy-eviction lag
+// from contaminating metric windows across successive test runs.
+func (b *Buffer) Tick() {
+	b.mu.Lock()
+	b.evictExpired(time.Now())
+	b.mu.Unlock()
+}
+
 // Len returns the number of active (incomplete) reassembly slots.
 func (b *Buffer) Len() int {
 	b.mu.Lock()
