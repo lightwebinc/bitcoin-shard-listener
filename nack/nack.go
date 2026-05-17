@@ -18,55 +18,31 @@ type TrackerConfig struct {
 	BackoffMax time.Duration // Cap on exponential backoff between retries
 	MaxRetries int           // Max NACK attempts before declaring unrecoverable
 	GapTTL     time.Duration // Max lifetime of a gap entry (~Bitcoin block interval)
-	TailTTL    time.Duration // Max idle time before a chain tail is evicted; 0 = GapTTL
+	TailTTL    time.Duration // Max idle time before a flow entry is evicted; 0 = GapTTL
 }
 
-// chainTail tracks one active hash chain within a group.
+// flowState tracks one active per-flow sequence stream.
 //
-// Tails are keyed by lastCurSeq in groupState.tails for O(1) PrevSeq matching.
-// An orphan tail (chainID == 0) was created when a gap was detected; it gains
-// a chainID when its predecessor gap is filled (cascade merge).
-type chainTail struct {
-	chainID    uint64    // initial CurSeq of the chain (set when PrevSeq==0); 0 = orphan
-	lastCurSeq uint64    // most recent CurSeq observed for this chain
-	lastSeen   time.Time // for stale-tail GC
-	gapCurSeq  uint64    // if orphan: the gap key (curSeq) that spawned this tail; 0 if attributed
+// Flows are keyed by hashKey = XXH64(senderIPv6 || groupIdx || subtreeID).
+// A gap is detected whenever seqNum > lastSeqNum+1.
+type flowState struct {
+	lastSeqNum uint64
+	groupIdx   uint32
+	subtreeID  [32]byte
+	pending    map[uint64]*gapEntry // keyed by missing seqNum
+	lastSeen   time.Time
 }
 
 // gapEntry holds retry state for a single missing frame.
-//
-// curSeq is the CurSeq of the missing frame (= PrevSeq of the frame that
-// revealed the gap). It is used as the backward lookup key: LookupByCurSeq.
-//
-// leftBoundary, when non-zero, is the CurSeq of the last good frame before
-// the gap. It enables the forward lookup: LookupByPrevSeq(leftBoundary).
-// It is set at detection time when the group has exactly one active tail
-// (single-sender case); otherwise it remains 0 and only the backward NACK
-// is dispatched.
 type gapEntry struct {
-	curSeq       uint64 // backward NACK target: LookupByCurSeq
-	leftBoundary uint64 // forward NACK target: LookupByPrevSeq; 0 = unknown
-	chainID      uint64 // 0 = unattributed
-	groupIdx     uint32
-	subtreeID    [32]byte // namespace for the lookup at the retry endpoint
-	retries      int
-	nextAttempt  time.Time
-	deadline     time.Time // absolute eviction deadline
-	endpointIdx  int       // round-robin index into registry snapshot
-}
-
-// trackerKey identifies one (groupIdx, subtreeID) namespace within the
-// per-shard gap tracker. Sequence chains are independent across subtrees so
-// state must not be shared.
-type trackerKey struct {
-	groupIdx  uint32
-	subtreeID [32]byte
-}
-
-// groupState holds all chains and pending gaps for one (groupIdx, subtreeID).
-type groupState struct {
-	tails   map[uint64]*chainTail // keyed by chainTail.lastCurSeq
-	pending map[uint64]*gapEntry  // keyed by gapEntry.curSeq
+	hashKey     uint64
+	seqNum      uint64 // the missing sequence number
+	groupIdx    uint32
+	subtreeID   [32]byte // for NACK SubtreeID field
+	retries     int
+	nextAttempt time.Time
+	deadline    time.Time // absolute eviction deadline
+	endpointIdx int       // round-robin index into registry snapshot
 }
 
 // Tracker is the gap state machine. Construct with [New] and call [Start] to
@@ -80,8 +56,8 @@ type Tracker struct {
 	respTimeout   time.Duration // deadline for ACK/MISS response (default 300ms)
 	maxConcurrent int           // semaphore bound for concurrent sendNACK goroutines
 
-	mu     sync.Mutex
-	states map[trackerKey]*groupState // keyed by (groupIdx, subtreeID)
+	mu    sync.Mutex
+	flows map[uint64]*flowState // keyed by hashKey
 
 	// nackQueue receives gap entries ready for NACK dispatch.
 	nackQueue chan *gapEntry
@@ -112,29 +88,29 @@ func New(cfg TrackerConfig, retryEndpoints []string, iface *net.Interface, rec *
 		registry:      registry,
 		respTimeout:   defaultRespTimeout,
 		maxConcurrent: defaultMaxConcurrent,
-		states:        make(map[trackerKey]*groupState),
+		flows:         make(map[uint64]*flowState),
 		nackQueue:     make(chan *gapEntry, 4096),
 		sem:           make(chan struct{}, defaultMaxConcurrent),
 	}
 }
 
 // Observe is called by the listener worker on every BRC-124/BRC-128 frame.
-// It detects chain breaks via tail matching and schedules NACKs.
-// curSeq == 0 means the proxy has not yet stamped the frame; it is ignored.
+// It detects gaps by comparing seqNum against the last known seqNum for the
+// flow identified by hashKey. seqNum == 0 means the proxy has not stamped the
+// frame; it is ignored.
 //
-// State is tracked per (groupIdx, subtreeID) because chains are subtree-scoped
-// (BRC-124 §1.2): a gap in subtree A must not affect subtree B's chain even
-// when both share a multicast group.
+// Each distinct hashKey represents one flow (sender × group × subtree).
+// Gaps are detected when seqNum > lastSeqNum+1 for the same flow.
 //
 // Processing steps:
-//  1. Skip unstamped frames (curSeq == 0).
-//  2. Fill check: if curSeq matches a pending gap key, close it.
-//  3. Duplicate check: if curSeq is already a known tail, update lastSeen and return.
-//  4. New chain start: if prevSeq == 0, register a new attributed tail.
-//  5. Chain extension: if prevSeq matches a known tail, advance it and cascade-merge orphans.
-//  6. Gap detected: prevSeq matches no tail — register a gap entry and create an orphan tail.
-func (t *Tracker) Observe(groupIdx uint32, subtreeID [32]byte, prevSeq, curSeq uint64, txid [32]byte) {
-	if curSeq == 0 {
+//  1. Skip unstamped frames (seqNum == 0).
+//  2. Look up (or create) the flowState for hashKey.
+//  3. Auto-fill: if seqNum matches a pending gap, close it.
+//  4. Ignore: seqNum <= lastSeqNum (duplicate or old retransmit).
+//  5. Contiguous: seqNum == lastSeqNum+1 → advance.
+//  6. Gap: seqNum > lastSeqNum+1 → register each missing seqNum.
+func (t *Tracker) Observe(groupIdx uint32, subtreeID [32]byte, hashKey, seqNum uint64, txid [32]byte) {
+	if seqNum == 0 {
 		return
 	}
 
@@ -143,129 +119,82 @@ func (t *Tracker) Observe(groupIdx uint32, subtreeID [32]byte, prevSeq, curSeq u
 
 	now := time.Now()
 
-	key := trackerKey{groupIdx: groupIdx, subtreeID: subtreeID}
-	st, ok := t.states[key]
+	fs, ok := t.flows[hashKey]
 	if !ok {
-		st = &groupState{
-			tails:   make(map[uint64]*chainTail),
-			pending: make(map[uint64]*gapEntry),
+		fs = &flowState{
+			groupIdx:  groupIdx,
+			subtreeID: subtreeID,
+			pending:   make(map[uint64]*gapEntry),
 		}
-		t.states[key] = st
+		t.flows[hashKey] = fs
 	}
+	fs.lastSeen = now
 
-	// Step 2: fill check — close any pending gap whose key equals curSeq.
-	if _, found := st.pending[curSeq]; found {
-		delete(st.pending, curSeq)
+	// Step 3: auto-fill — close any pending gap whose seqNum matches.
+	if _, found := fs.pending[seqNum]; found {
+		delete(fs.pending, seqNum)
 		if t.rec != nil {
 			t.rec.GapSuppressed()
 		}
-		// Do not return; this frame still participates in chain tracking below.
+		// Fall through: update lastSeqNum if this advances the stream.
 	}
 
-	// Step 3: duplicate check — curSeq already recorded as a tail.
-	if tail, isDup := st.tails[curSeq]; isDup {
-		tail.lastSeen = now
+	if fs.lastSeqNum == 0 {
+		// First frame for this flow.
+		fs.lastSeqNum = seqNum
 		return
 	}
 
-	// Step 4: new chain start (PrevSeq == 0).
-	if prevSeq == 0 {
-		st.tails[curSeq] = &chainTail{
-			chainID:    curSeq,
-			lastCurSeq: curSeq,
-			lastSeen:   now,
-		}
+	if seqNum <= fs.lastSeqNum {
+		// Step 4: duplicate or old retransmit.
 		return
 	}
 
-	// Step 5: extend an existing chain (PrevSeq matches a known tail).
-	if tail, found := st.tails[prevSeq]; found {
-		delete(st.tails, prevSeq)
-		tail.lastCurSeq = curSeq
-		tail.lastSeen = now
-		st.tails[curSeq] = tail
-		// Cascade: merge orphan tails that were waiting for this gap to be filled.
-		t.cascadeMerge(st, tail.chainID, curSeq)
+	if seqNum == fs.lastSeqNum+1 {
+		// Step 5: contiguous.
+		fs.lastSeqNum = seqNum
 		return
 	}
 
-	// Step 6: gap detected — prevSeq matches no known tail.
-	gapKey := prevSeq // = CurSeq of the missing frame; backward NACK key
-	if _, already := st.pending[gapKey]; !already {
-		jitter := time.Duration(rand.Int64N(int64(t.cfg.JitterMax) + 1))
-
-		// leftBoundary is knowable only when a single tail exists in this group
-		// (the common single-sender case). With multiple tails we cannot
-		// determine which chain the gap belongs to, so we fall back to
-		// backward-only NACK.
-		var leftBoundary uint64
-		if len(st.tails) == 1 {
-			for _, tail := range st.tails {
-				leftBoundary = tail.lastCurSeq
+	// Step 6: gap — register each missing seqNum in (lastSeqNum, seqNum).
+	for missing := fs.lastSeqNum + 1; missing < seqNum; missing++ {
+		if _, exists := fs.pending[missing]; !exists {
+			jitter := time.Duration(rand.Int64N(int64(t.cfg.JitterMax) + 1))
+			e := &gapEntry{
+				hashKey:     hashKey,
+				seqNum:      missing,
+				groupIdx:    groupIdx,
+				subtreeID:   subtreeID,
+				nextAttempt: now.Add(jitter),
+				deadline:    now.Add(t.cfg.GapTTL),
 			}
-		}
-
-		e := &gapEntry{
-			curSeq:       gapKey,
-			leftBoundary: leftBoundary,
-			groupIdx:     groupIdx,
-			subtreeID:    subtreeID,
-			nextAttempt:  now.Add(jitter),
-			deadline:     now.Add(t.cfg.GapTTL),
-		}
-		st.pending[gapKey] = e
-		if t.rec != nil {
-			t.rec.GapDetected()
-		}
-	}
-
-	// Register an orphan tail for the frame that revealed the gap.
-	// gapCurSeq records which gap created this orphan so it can be merged
-	// when the predecessor gap is eventually filled.
-	st.tails[curSeq] = &chainTail{
-		chainID:    0,
-		lastCurSeq: curSeq,
-		lastSeen:   now,
-		gapCurSeq:  prevSeq,
-	}
-}
-
-// cascadeMerge attributes orphan tails to chainID by following the gapCurSeq
-// links. Called after a chain is extended to newTailCurSeq.
-func (t *Tracker) cascadeMerge(st *groupState, chainID, newTailCurSeq uint64) {
-	queue := []uint64{newTailCurSeq}
-	for len(queue) > 0 {
-		gapCurSeq := queue[0]
-		queue = queue[1:]
-		for _, orphan := range st.tails {
-			if orphan.chainID == 0 && orphan.gapCurSeq == gapCurSeq {
-				orphan.chainID = chainID
-				orphan.gapCurSeq = 0
-				queue = append(queue, orphan.lastCurSeq)
+			fs.pending[missing] = e
+			if t.rec != nil {
+				t.rec.GapDetected()
 			}
 		}
 	}
+	fs.lastSeqNum = seqNum
 }
 
-// Fill cancels a pending gap when a retransmitted frame arrives via multicast
-// with the given (groupIdx, subtreeID, curSeq). This is a lighter-weight path
-// for callers that do not have the full frame; Observe handles the same fill
-// check automatically when the retransmit is processed as a regular frame.
-func (t *Tracker) Fill(groupIdx uint32, subtreeID [32]byte, curSeq uint64) {
-	if curSeq == 0 {
+// Fill cancels a pending gap when a retransmitted frame arrives out-of-band
+// and the caller has (hashKey, seqNum) but not the full frame. Observe handles
+// the same fill check automatically when the retransmit is processed normally.
+func (t *Tracker) Fill(hashKey, seqNum uint64) {
+	if seqNum == 0 {
 		return
 	}
 	t.mu.Lock()
-	key := trackerKey{groupIdx: groupIdx, subtreeID: subtreeID}
-	if st, ok := t.states[key]; ok {
-		if _, found := st.pending[curSeq]; found {
-			delete(st.pending, curSeq)
+	defer t.mu.Unlock()
+
+	if fs, ok := t.flows[hashKey]; ok {
+		if _, found := fs.pending[seqNum]; found {
+			delete(fs.pending, seqNum)
 			if t.rec != nil {
 				t.rec.GapSuppressed()
 			}
 		}
 	}
-	t.mu.Unlock()
 }
 
 // Start launches the background NACK dispatch loop and GC sweeper.
@@ -294,32 +223,32 @@ func (t *Tracker) sweepOnce(now time.Time) {
 	t.mu.Lock()
 	defer t.mu.Unlock()
 
-	tailTTL := t.cfg.TailTTL
-	if tailTTL <= 0 {
-		tailTTL = t.cfg.GapTTL
+	flowTTL := t.cfg.TailTTL
+	if flowTTL <= 0 {
+		flowTTL = t.cfg.GapTTL
 	}
 
-	for tk, st := range t.states {
-		for key, e := range st.pending {
+	for hk, fs := range t.flows {
+		for seq, e := range fs.pending {
 			if now.After(e.deadline) {
-				delete(st.pending, key)
+				delete(fs.pending, seq)
 				if t.rec != nil {
 					t.rec.GapUnrecovered()
 				}
 				t.log.Debug("gap evicted (TTL)",
-					"group", tk.groupIdx,
-					"cur_seq", e.curSeq,
+					"hash_key", hk,
+					"seq_num", e.seqNum,
 				)
 				continue
 			}
 			if e.retries >= t.cfg.MaxRetries {
-				delete(st.pending, key)
+				delete(fs.pending, seq)
 				if t.rec != nil {
 					t.rec.GapUnrecovered()
 				}
 				t.log.Debug("gap evicted (retries)",
-					"group", tk.groupIdx,
-					"cur_seq", e.curSeq,
+					"hash_key", hk,
+					"seq_num", e.seqNum,
 				)
 				continue
 			}
@@ -337,20 +266,9 @@ func (t *Tracker) sweepOnce(now time.Time) {
 			}
 		}
 
-		// Stale tail eviction: remove tails idle beyond TailTTL.
-		for curSeq, tail := range st.tails {
-			if now.Sub(tail.lastSeen) > tailTTL {
-				delete(st.tails, curSeq)
-				t.log.Debug("tail evicted (TTL)",
-					"group", tk.groupIdx,
-					"chain_id", tail.chainID,
-					"last_cur_seq", tail.lastCurSeq,
-				)
-			}
-		}
-
-		if len(st.pending) == 0 && len(st.tails) == 0 {
-			delete(t.states, tk)
+		// Evict idle flows with no pending gaps.
+		if len(fs.pending) == 0 && now.Sub(fs.lastSeen) > flowTTL {
+			delete(t.flows, hk)
 		}
 	}
 }
@@ -375,15 +293,9 @@ func (t *Tracker) dispatchLoop(ctx context.Context) {
 	}
 }
 
-// sendNACK dispatches NACK(s) to a retry endpoint, then waits for the first
+// sendNACK dispatches a NACK to a retry endpoint, then waits for the first
 // ACK/MISS response. On ACK the gap is cancelled; on MISS or timeout, retry
 // state advances with exponential backoff.
-//
-// When leftBoundary is known (single-sender case), two NACKs are sent in
-// parallel: forward (LookupByPrevSeq) and backward (LookupByCurSeq). When
-// leftBoundary is 0 (multi-sender or unattributed), only the backward NACK is
-// sent. Chain reconnection via cascadeMerge populates leftBoundary on future
-// retry attempts once the chain is identified.
 func (t *Tracker) sendNACK(e *gapEntry) {
 	snap := t.registry.Snapshot()
 	if len(snap) == 0 {
@@ -417,18 +329,15 @@ func (t *Tracker) sendNACK(e *gapEntry) {
 	}
 	defer func() { _ = conn.Close() }()
 
-	// Backward NACK: find frame whose CurSeq == e.curSeq.
-	var bwdBuf [NACKSize]byte
-	Encode(&NACK{MsgType: MsgTypeNACK, LookupType: LookupByCurSeq, LookupSeq: e.curSeq, ChainID: e.chainID, SubtreeID: e.subtreeID}, bwdBuf[:])
-	_, _ = conn.WriteTo(bwdBuf[:], addr)
-
-	// Forward NACK: sent only when leftBoundary is known (single-sender or
-	// after chain reconnection). Finds the frame whose PrevSeq == leftBoundary.
-	if e.leftBoundary != 0 {
-		var fwdBuf [NACKSize]byte
-		Encode(&NACK{MsgType: MsgTypeNACK, LookupType: LookupByPrevSeq, LookupSeq: e.leftBoundary, ChainID: e.chainID, SubtreeID: e.subtreeID}, fwdBuf[:])
-		_, _ = conn.WriteTo(fwdBuf[:], addr)
-	}
+	var buf [NACKSize]byte
+	Encode(&NACK{
+		MsgType:   MsgTypeNACK,
+		HashKey:   e.hashKey,
+		StartSeq:  e.seqNum,
+		EndSeq:    e.seqNum,
+		SubtreeID: e.subtreeID,
+	}, buf[:])
+	_, _ = conn.WriteTo(buf[:], addr)
 
 	if t.rec != nil {
 		t.rec.NACKDispatched()
@@ -436,13 +345,11 @@ func (t *Tracker) sendNACK(e *gapEntry) {
 	t.log.Debug("NACK dispatched",
 		"endpoint", endpoint.Addr,
 		"tier", endpoint.Tier,
-		"left_boundary", e.leftBoundary,
-		"cur_seq", e.curSeq,
+		"hash_key", e.hashKey,
+		"seq_num", e.seqNum,
 		"retry", e.retries+1,
 	)
 
-	// Wait for any response (ACK or MISS). Both NACKs share the same socket,
-	// so the first response received determines the action.
 	_ = conn.SetReadDeadline(time.Now().Add(t.respTimeout))
 	var respBuf [ResponseSize + 16]byte
 	nr, _, err := conn.ReadFrom(respBuf[:])
@@ -463,13 +370,13 @@ func (t *Tracker) sendNACK(e *gapEntry) {
 		t.cancelGap(e)
 		t.log.Debug("NACK: ACK received, gap cancelled",
 			"endpoint", endpoint.Addr,
-			"cur_seq", e.curSeq,
+			"seq_num", e.seqNum,
 			"flags", resp.Flags,
 		)
 	case MsgTypeMISS:
 		t.log.Debug("NACK: MISS received, advancing endpoint",
 			"endpoint", endpoint.Addr,
-			"cur_seq", e.curSeq,
+			"seq_num", e.seqNum,
 		)
 		t.advanceEndpoint(e, true, len(snap))
 	}
@@ -487,12 +394,11 @@ func (t *Tracker) advanceEndpoint(e *gapEntry, immediate bool, numEndpoints int)
 	t.mu.Lock()
 	defer t.mu.Unlock()
 
-	key := trackerKey{groupIdx: e.groupIdx, subtreeID: e.subtreeID}
-	st, ok := t.states[key]
+	fs, ok := t.flows[e.hashKey]
 	if !ok {
 		return
 	}
-	entry, ok := st.pending[e.curSeq]
+	entry, ok := fs.pending[e.seqNum]
 	if !ok {
 		return
 	}
@@ -512,42 +418,22 @@ func (t *Tracker) advanceEndpoint(e *gapEntry, immediate bool, numEndpoints int)
 	}
 }
 
-// PendingGaps returns the total number of unresolved gap entries across all
-// groups. Useful for testing and diagnostics.
+// PendingGaps returns the total number of unresolved gap entries across all flows.
 func (t *Tracker) PendingGaps() int {
 	t.mu.Lock()
 	defer t.mu.Unlock()
 	total := 0
-	for _, st := range t.states {
-		total += len(st.pending)
+	for _, fs := range t.flows {
+		total += len(fs.pending)
 	}
 	return total
 }
 
-// GapLeftBoundary returns the leftBoundary stored for the gap entry identified
-// by (groupIdx, subtreeID, gapCurSeq). Returns 0 if the gap does not exist. For testing.
-func (t *Tracker) GapLeftBoundary(groupIdx uint32, subtreeID [32]byte, gapCurSeq uint64) uint64 {
+// ActiveFlows returns the number of active flows being tracked.
+func (t *Tracker) ActiveFlows() int {
 	t.mu.Lock()
 	defer t.mu.Unlock()
-	key := trackerKey{groupIdx: groupIdx, subtreeID: subtreeID}
-	if st, ok := t.states[key]; ok {
-		if e, ok := st.pending[gapCurSeq]; ok {
-			return e.leftBoundary
-		}
-	}
-	return 0
-}
-
-// ActiveTails returns the total number of chain tails tracked across all
-// groups. Useful for testing and diagnostics.
-func (t *Tracker) ActiveTails() int {
-	t.mu.Lock()
-	defer t.mu.Unlock()
-	total := 0
-	for _, st := range t.states {
-		total += len(st.tails)
-	}
-	return total
+	return len(t.flows)
 }
 
 // cancelGap removes a gap entry after receiving an ACK.
@@ -555,10 +441,9 @@ func (t *Tracker) cancelGap(e *gapEntry) {
 	t.mu.Lock()
 	defer t.mu.Unlock()
 
-	key := trackerKey{groupIdx: e.groupIdx, subtreeID: e.subtreeID}
-	if st, ok := t.states[key]; ok {
-		if _, found := st.pending[e.curSeq]; found {
-			delete(st.pending, e.curSeq)
+	if fs, ok := t.flows[e.hashKey]; ok {
+		if _, found := fs.pending[e.seqNum]; found {
+			delete(fs.pending, e.seqNum)
 			if t.rec != nil {
 				t.rec.GapSuppressed()
 			}

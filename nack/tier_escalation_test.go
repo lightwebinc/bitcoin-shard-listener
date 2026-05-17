@@ -53,7 +53,7 @@ func (m *mockEndpoint) run() {
 			curSeq = 200
 		}
 		var out [nack.ResponseSize]byte
-		nack.EncodeResponse(&nack.Response{MsgType: resp, Flags: 0x01, CurSeq: curSeq}, out[:])
+		nack.EncodeResponse(&nack.Response{MsgType: resp, Flags: 0x01, SeqNum: curSeq}, out[:])
 		_, _ = m.conn.WriteTo(out[:], src)
 	}
 }
@@ -95,8 +95,9 @@ func TestTierEscalation_RecoversAfterDeepTierMiss(t *testing.T) {
 	}
 	tr := nack.New(cfg, nil, nil, nil, reg)
 
-	tr.Observe(0, [32]byte{}, 0, 100, [32]byte{})
-	tr.Observe(0, [32]byte{}, 200, 300, [32]byte{}) // gap, key=200
+	const flowA = uint64(0xAAAAAAAAAAAAAAAA)
+	tr.Observe(0, [32]byte{}, flowA, 1, [32]byte{})
+	tr.Observe(0, [32]byte{}, flowA, 3, [32]byte{}) // gap at seqNum=2
 	if g := tr.PendingGaps(); g != 1 {
 		t.Fatalf("setup: PendingGaps = %d, want 1", g)
 	}
@@ -137,8 +138,9 @@ func TestTierEscalation_LowerTiersNotRetriedAfterMiss(t *testing.T) {
 	}
 	tr := nack.New(cfg, nil, nil, nil, reg)
 
-	tr.Observe(0, [32]byte{}, 0, 100, [32]byte{})
-	tr.Observe(0, [32]byte{}, 200, 300, [32]byte{})
+	const flowB = uint64(0xBBBBBBBBBBBBBBBB)
+	tr.Observe(0, [32]byte{}, flowB, 1, [32]byte{})
+	tr.Observe(0, [32]byte{}, flowB, 3, [32]byte{}) // gap at seqNum=2
 
 	ctx, cancel := context.WithCancel(context.Background())
 	defer cancel()
@@ -148,17 +150,16 @@ func TestTierEscalation_LowerTiersNotRetriedAfterMiss(t *testing.T) {
 		t.Fatalf("gap not recovered: PendingGaps = %d", got)
 	}
 
-	// Each sendNACK attempt sends 2 datagrams (fwd+bwd) when leftBoundary != 0.
-	// retry1 and retry2 must be visited exactly once each → at most 2 datagrams.
-	if c := r1.count.Load(); c > 2 {
-		t.Errorf("retry1 hit %d times, want ≤ 2 (must not re-cycle through lower tier)", c)
+	// Each sendNACK attempt sends 1 datagram (single NACK per gap).
+	// retry1 and retry2 must be visited exactly once each.
+	if c := r1.count.Load(); c > 1 {
+		t.Errorf("retry1 hit %d times, want ≤ 1 (must not re-cycle through lower tier)", c)
 	}
-	if c := r2.count.Load(); c > 2 {
-		t.Errorf("retry2 hit %d times, want ≤ 2 (must not re-cycle through lower tier)", c)
+	if c := r2.count.Load(); c > 1 {
+		t.Errorf("retry2 hit %d times, want ≤ 1 (must not re-cycle through lower tier)", c)
 	}
-	// retry3 must be hit at least 3 times (the third attempt finally ACKs after
-	// two MISSes, accounting for 2 datagrams per attempt × 3 attempts).
-	if c := r3.count.Load(); c < 3 {
-		t.Errorf("retry3 hit %d times, want ≥ 3", c)
+	// retry3 must be hit at least 2 times (initial MISS + eventual ACK retry).
+	if c := r3.count.Load(); c < 2 {
+		t.Errorf("retry3 hit %d times, want ≥ 2", c)
 	}
 }

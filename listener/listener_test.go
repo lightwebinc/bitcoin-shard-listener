@@ -98,7 +98,7 @@ func buildSequencedFrame(t *testing.T, txid [32]byte, payload []byte, curSeq uin
 	f := &frame.Frame{
 		Version: frame.FrameVerV2,
 		TxID:    txid,
-		CurSeq:  curSeq,
+		SeqNum:  curSeq,
 		Payload: payload,
 	}
 	buf := make([]byte, frame.HeaderSize+len(payload))

@@ -235,15 +235,15 @@ func (w *Worker) processFrame(raw []byte) {
 	// retransmit both reach the listener (common at 1+% loss with a warm
 	// retry endpoint), forward only the first. Gap-state suppression in
 	// nack.Tracker.Observe is independent and still runs below.
-	if w.dedupSet != nil && f.Version == frame.FrameVerV2 && f.CurSeq != 0 {
-		if w.dedupSet.SeenAndAdd(dedup.Key{GroupIdx: groupIdx, SubtreeID: f.SubtreeID, CurSeq: f.CurSeq}) {
+	if w.dedupSet != nil && f.Version == frame.FrameVerV2 && f.SeqNum != 0 {
+		if w.dedupSet.SeenAndAdd(dedup.Key{GroupIdx: groupIdx, SubtreeID: f.SubtreeID, SeqNum: f.SeqNum}) {
 			if w.rec != nil {
 				w.rec.FrameDeduped(w.id)
 			}
 			// Skip egress, but still let the tracker observe the frame so
-			// gap-fill / chain-tail bookkeeping stays accurate.
+			// gap-fill bookkeeping stays accurate.
 			if w.tracker != nil {
-				w.tracker.Observe(groupIdx, f.SubtreeID, f.PrevSeq, f.CurSeq, f.TxID)
+				w.tracker.Observe(groupIdx, f.SubtreeID, f.HashKey, f.SeqNum, f.TxID)
 			}
 			return
 		}
@@ -274,16 +274,16 @@ func (w *Worker) processFrame(raw []byte) {
 		}
 	}
 
-	// Gap tracking: BRC-124/BRC-128 only, CurSeq must be non-zero (proxy-stamped).
-	if w.tracker != nil && f.Version == frame.FrameVerV2 && f.CurSeq != 0 {
-		w.tracker.Observe(groupIdx, f.SubtreeID, f.PrevSeq, f.CurSeq, f.TxID)
+	// Gap tracking: BRC-124/BRC-128 only, SeqNum must be non-zero (proxy-stamped).
+	if w.tracker != nil && f.Version == frame.FrameVerV2 && f.SeqNum != 0 {
+		w.tracker.Observe(groupIdx, f.SubtreeID, f.HashKey, f.SeqNum, f.TxID)
 	}
 
 	if w.debug {
 		w.log.Debug("frame forwarded",
 			"version", f.Version,
 			"group", groupIdx,
-			"cur_seq", f.CurSeq,
+			"seq_num", f.SeqNum,
 		)
 	}
 }

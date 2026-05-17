@@ -7,8 +7,8 @@ import (
 )
 
 func TestNACKSize(t *testing.T) {
-	if nack.NACKSize != 56 {
-		t.Errorf("NACKSize = %d, want 56", nack.NACKSize)
+	if nack.NACKSize != 64 {
+		t.Errorf("NACKSize = %d, want 64", nack.NACKSize)
 	}
 }
 
@@ -18,11 +18,11 @@ func TestEncodeDecodeNACK_SubtreeID(t *testing.T) {
 		sub[i] = byte(i + 1)
 	}
 	n := &nack.NACK{
-		MsgType:    nack.MsgTypeNACK,
-		LookupType: nack.LookupByCurSeq,
-		LookupSeq:  0x1122334455667788,
-		ChainID:    0xAABBCCDDEEFF0011,
-		SubtreeID:  sub,
+		MsgType:   nack.MsgTypeNACK,
+		HashKey:   0xAABBCCDDEEFF0011,
+		StartSeq:  0x1122334455667788,
+		EndSeq:    0x1122334455667788,
+		SubtreeID: sub,
 	}
 	var buf [nack.NACKSize]byte
 	nack.Encode(n, buf[:])
@@ -34,8 +34,8 @@ func TestEncodeDecodeNACK_SubtreeID(t *testing.T) {
 	if got.SubtreeID != sub {
 		t.Errorf("SubtreeID = %x, want %x", got.SubtreeID, sub)
 	}
-	if got.ChainID != n.ChainID {
-		t.Errorf("ChainID = %x, want %x", got.ChainID, n.ChainID)
+	if got.HashKey != n.HashKey {
+		t.Errorf("HashKey = 0x%016X, want 0x%016X", got.HashKey, n.HashKey)
 	}
 }
 
@@ -45,11 +45,12 @@ func TestResponseSize(t *testing.T) {
 	}
 }
 
-func TestEncodeDecodeNACK_ByPrevSeq(t *testing.T) {
+func TestEncodeDecodeNACK_RoundTrip(t *testing.T) {
 	n := &nack.NACK{
-		MsgType:    nack.MsgTypeNACK,
-		LookupType: nack.LookupByPrevSeq,
-		LookupSeq:  0xDEADBEEFCAFEBABE,
+		MsgType:  nack.MsgTypeNACK,
+		HashKey:  0xDEADBEEFCAFEBABE,
+		StartSeq: 0x0102030405060708,
+		EndSeq:   0x0102030405060708,
 	}
 	var buf [nack.NACKSize]byte
 	nack.Encode(n, buf[:])
@@ -61,19 +62,23 @@ func TestEncodeDecodeNACK_ByPrevSeq(t *testing.T) {
 	if got.MsgType != nack.MsgTypeNACK {
 		t.Errorf("MsgType = 0x%02X, want 0x%02X", got.MsgType, nack.MsgTypeNACK)
 	}
-	if got.LookupType != nack.LookupByPrevSeq {
-		t.Errorf("LookupType = 0x%02X, want LookupByPrevSeq", got.LookupType)
+	if got.HashKey != n.HashKey {
+		t.Errorf("HashKey = 0x%016X, want 0x%016X", got.HashKey, n.HashKey)
 	}
-	if got.LookupSeq != n.LookupSeq {
-		t.Errorf("LookupSeq = 0x%016X, want 0x%016X", got.LookupSeq, n.LookupSeq)
+	if got.StartSeq != n.StartSeq {
+		t.Errorf("StartSeq = 0x%016X, want 0x%016X", got.StartSeq, n.StartSeq)
+	}
+	if got.EndSeq != n.EndSeq {
+		t.Errorf("EndSeq = 0x%016X, want 0x%016X", got.EndSeq, n.EndSeq)
 	}
 }
 
-func TestEncodeDecodeNACK_ByCurSeq(t *testing.T) {
+func TestEncodeDecodeNACK_StartSeqEndSeq(t *testing.T) {
 	n := &nack.NACK{
-		MsgType:    nack.MsgTypeNACK,
-		LookupType: nack.LookupByCurSeq,
-		LookupSeq:  0x0102030405060708,
+		MsgType:  nack.MsgTypeNACK,
+		HashKey:  0xAAAAAAAAAAAAAAAA,
+		StartSeq: 100,
+		EndSeq:   200,
 	}
 	var buf [nack.NACKSize]byte
 	nack.Encode(n, buf[:])
@@ -82,11 +87,11 @@ func TestEncodeDecodeNACK_ByCurSeq(t *testing.T) {
 	if err != nil {
 		t.Fatalf("Decode: %v", err)
 	}
-	if got.LookupType != nack.LookupByCurSeq {
-		t.Errorf("LookupType = 0x%02X, want LookupByCurSeq", got.LookupType)
+	if got.StartSeq != n.StartSeq {
+		t.Errorf("StartSeq = %d, want %d", got.StartSeq, n.StartSeq)
 	}
-	if got.LookupSeq != n.LookupSeq {
-		t.Errorf("LookupSeq mismatch")
+	if got.EndSeq != n.EndSeq {
+		t.Errorf("EndSeq = %d, want %d", got.EndSeq, n.EndSeq)
 	}
 }
 
@@ -120,7 +125,7 @@ func TestEncodeDecodeACK(t *testing.T) {
 	r := &nack.Response{
 		MsgType: nack.MsgTypeACK,
 		Flags:   0x03, // multicast_sent | unicast_sent
-		CurSeq:  0xAABBCCDDEEFF0011,
+		SeqNum:  0xAABBCCDDEEFF0011,
 	}
 	var buf [nack.ResponseSize]byte
 	nack.EncodeResponse(r, buf[:])
@@ -135,8 +140,8 @@ func TestEncodeDecodeACK(t *testing.T) {
 	if got.Flags != 0x03 {
 		t.Errorf("Flags = 0x%02X, want 0x03", got.Flags)
 	}
-	if got.CurSeq != r.CurSeq {
-		t.Errorf("CurSeq = 0x%016X, want 0x%016X", got.CurSeq, r.CurSeq)
+	if got.SeqNum != r.SeqNum {
+		t.Errorf("SeqNum = 0x%016X, want 0x%016X", got.SeqNum, r.SeqNum)
 	}
 }
 
@@ -144,7 +149,7 @@ func TestEncodeDecodeMISS(t *testing.T) {
 	r := &nack.Response{
 		MsgType: nack.MsgTypeMISS,
 		Flags:   0x00,
-		CurSeq:  0, // zero for MISS
+		SeqNum:  0, // zero for MISS
 	}
 	var buf [nack.ResponseSize]byte
 	nack.EncodeResponse(r, buf[:])
@@ -156,8 +161,8 @@ func TestEncodeDecodeMISS(t *testing.T) {
 	if got.MsgType != nack.MsgTypeMISS {
 		t.Errorf("MsgType = 0x%02X, want MISS", got.MsgType)
 	}
-	if got.CurSeq != 0 {
-		t.Errorf("CurSeq = %d, want 0 for MISS", got.CurSeq)
+	if got.SeqNum != 0 {
+		t.Errorf("SeqNum = %d, want 0 for MISS", got.SeqNum)
 	}
 }
 

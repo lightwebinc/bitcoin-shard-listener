@@ -8,7 +8,7 @@ import (
 func key(g uint32, sub byte, seq uint64) Key {
 	var s [32]byte
 	s[0] = sub
-	return Key{GroupIdx: g, SubtreeID: s, CurSeq: seq}
+	return Key{GroupIdx: g, SubtreeID: s, SeqNum: seq}
 }
 
 func TestSeenAndAdd_FirstInsertIsMiss(t *testing.T) {

@@ -17,11 +17,11 @@ import (
 	"time"
 )
 
-// Key uniquely identifies a stamped BRC-124/BRC-128 frame for dedup purposes.
+// Key identifies a unique frame for deduplication purposes.
 type Key struct {
 	GroupIdx  uint32
 	SubtreeID [32]byte
-	CurSeq    uint64
+	SeqNum    uint64
 }
 
 // Set is a fixed-capacity, TTL-bounded duplicate detector.
