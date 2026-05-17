@@ -14,11 +14,12 @@ import (
 
 // TrackerConfig holds tuning parameters for the gap tracker.
 type TrackerConfig struct {
-	JitterMax  time.Duration // Max random hold-off before first NACK (NORM suppression window)
-	BackoffMax time.Duration // Cap on exponential backoff between retries
-	MaxRetries int           // Max NACK attempts before declaring unrecoverable
-	GapTTL     time.Duration // Max lifetime of a gap entry (~Bitcoin block interval)
-	TailTTL    time.Duration // Max idle time before a flow entry is evicted; 0 = GapTTL
+	JitterMax         time.Duration // Max random hold-off before first NACK (NORM suppression window)
+	BackoffMax        time.Duration // Cap on exponential backoff between retries
+	MaxRetries        int           // Max NACK attempts before declaring unrecoverable
+	GapTTL            time.Duration // Max lifetime of a gap entry (~Bitcoin block interval)
+	TailTTL           time.Duration // Max idle time before a flow entry is evicted; 0 = GapTTL
+	SeqResetThreshold uint64        // If seqNum <= threshold on an established flow, treat as proxy restart (default 100)
 }
 
 // flowState tracks one active per-flow sequence stream.
@@ -146,7 +147,27 @@ func (t *Tracker) Observe(groupIdx uint32, subtreeID [32]byte, hashKey, seqNum u
 	}
 
 	if seqNum <= fs.lastSeqNum {
-		// Step 4: duplicate or old retransmit.
+		// Step 4: duplicate, old retransmit, or proxy restart.
+		// Detect a proxy restart: SeqNum rolled back to a very small value on an
+		// established flow (lastSeqNum significantly higher). Reset the flow so
+		// the restarted proxy's sequence stream is tracked from scratch.
+		threshold := t.cfg.SeqResetThreshold
+		if threshold == 0 {
+			threshold = 100
+		}
+		if seqNum <= threshold && fs.lastSeqNum > threshold {
+			// Proxy restarted: evict any pending gaps (unrecoverable now) and
+			// reset the flow counter.
+			for _, e := range fs.pending {
+				_ = e // gaps from previous proxy lifetime; drop silently
+				if t.rec != nil {
+					t.rec.GapUnrecovered()
+				}
+			}
+			fs.pending = make(map[uint64]*gapEntry)
+			fs.lastSeqNum = seqNum
+			return
+		}
 		return
 	}
 
