@@ -207,7 +207,7 @@ func Load() (*Config, error) {
 	flag.IntVar(&c.EgressDedupCap, "egress-dedup-cap", envInt("EGRESS_DEDUP_CAP", 0),
 		"egress duplicate-suppression capacity (0 = disabled); typical value: workers × tps × dedup-ttl")
 	flag.DurationVar(&c.EgressDedupTTL, "egress-dedup-ttl", envDuration("EGRESS_DEDUP_TTL", 2*time.Second),
-		"egress dedup TTL: max age of a remembered (groupIdx, subtreeID, CurSeq) tuple")
+		"egress dedup TTL: max age of a remembered (groupIdx, subtreeID, SeqNum) tuple")
 	flag.DurationVar(&c.DrainTimeout, "drain-timeout", envDuration("DRAIN_TIMEOUT", 0),
 		"pre-drain delay before closing sockets; /readyz returns 503 during this window (0 = disabled)")
 	flag.StringVar(&c.MetricsAddr, "metrics-addr", envStr("METRICS_ADDR", ":9200"),

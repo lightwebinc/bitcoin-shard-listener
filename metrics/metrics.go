@@ -282,7 +282,7 @@ func (r *Recorder) FrameInvalidPayload(workerID int) {
 }
 
 // FrameDeduped records a BRC-124/BRC-128 retransmit suppressed before egress
-// because the (groupIdx, subtreeID, CurSeq) tuple was already forwarded
+// because the (groupIdx, subtreeID, SeqNum) tuple was already forwarded
 // recently. The gap-state suppression metric (GapSuppressed) is a separate
 // signal: it tracks gap-tracker fills, not egress dedup.
 func (r *Recorder) FrameDeduped(workerID int) {

@@ -12,11 +12,11 @@
 // # Hot path per frame
 //
 //  1. ReadFrom (per-worker receive buffer)
-//  2. frame.Decode — extract TxID, Version, PrevSeq, CurSeq
+//  2. frame.Decode — extract TxID, Version, HashKey, SeqNum
 //  3. shard.Engine.GroupIndex — derive groupIdx from TxID
 //  4. filter.Filter.Allow — shard/subtree gating
 //  5. egress.Sender.Send — unicast forward to downstream
-//  6. nack.Tracker.Observe — gap detection (BRC-124/BRC-128 only, non-zero CurSeq)
+//  6. nack.Tracker.Observe — gap detection (BRC-124/BRC-128 only, non-zero SeqNum)
 package listener
 
 import (
@@ -65,7 +65,7 @@ type Worker struct {
 }
 
 // SetEgressDedup attaches a duplicate-suppression set keyed on
-// (groupIdx, subtreeID, CurSeq). When set, retransmits whose key was already
+// (groupIdx, subtreeID, SeqNum). When set, retransmits whose key was already
 // forwarded recently are dropped before egress. nil disables dedup. Defaults
 // to disabled.
 func (w *Worker) SetEgressDedup(s *dedup.Set) {

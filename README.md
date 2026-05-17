@@ -11,8 +11,8 @@ Multicast subscriber and forwarder for the BSV transaction sharding pipeline.
 Receives BRC-124/BRC-128 frames from the `bitcoin-shard-proxy` multicast fabric, applies
 shard and subtree filters, forwards matching frames to a configurable downstream
 consumer over unicast UDP/TCP and/or multicast egress (domain bridging), and
-performs NORM-inspired NACK-based gap recovery via PrevSeq/CurSeq hash-chain
-tracking with BRC-126 beacon-discovered retry endpoints and
+performs NORM-inspired NACK-based gap recovery via HashKey/SeqNum per-flow
+sequence tracking with BRC-126 beacon-discovered retry endpoints and
 tier-based escalation.
 
 ```
@@ -31,8 +31,8 @@ FF05::<shard>:9001  ──multicast──►  bitcoin-shard-listener  ──UDP/
 - **Shard filter** — subscribe to a subset of shard groups (empty = all)
 - **Subtree filter** — include/exclude by 32-byte SubtreeID (BRC-124/BRC-128 frames)
 - **BRC-127 subtree group announcements** — dynamic group-based filtering via multicast SubtreeAnnounce datagrams with TTL eviction and sender ACLs
-- **Gap tracking** — per-group PrevSeq/CurSeq hash-chain gap detection (BRC-124/BRC-128)
-- **NACK dispatch** — 24-byte NACK datagrams (LookupType + LookupSeq) with 16-byte ACK/MISS response handling
+- **Gap tracking** — per-flow HashKey/SeqNum monotonic counter gap detection (BRC-124/BRC-128)
+- **NACK dispatch** — 64-byte NACK datagrams (HashKey + StartSeq/EndSeq + SubtreeID) with 16-byte ACK/MISS response handling
 - **Beacon discovery** — dynamic retry endpoint registry via BRC-126 ADVERT beacons
 - **Tier escalation** — MISS → immediate advance to next endpoint; ACK → gap cancelled
 - **Semaphore-bounded dispatch** — concurrent NACK goroutines with configurable limit

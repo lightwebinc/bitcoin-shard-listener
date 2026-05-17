@@ -14,7 +14,7 @@ BSV senders
    │ (TCP or UDP ingress)
    ▼
 bitcoin-shard-proxy
-   │ BRC-124/BRC-128 frames, PrevSeq/CurSeq stamped in-place at bytes 40–55 (XXH64)
+   │ BRC-124/BRC-128 frames, HashKey/SeqNum stamped in-place at bytes 40–55
    │ IPv6 multicast  FF05::<group-index>
    ▼
 Multicast fabric (site-scoped FF05::/16)
@@ -35,7 +35,7 @@ Each worker:
 3. Calls `frame.Decode`, `shard.Engine.GroupIndex`, `filter.Allow`,
    `egress.Send`, and optionally `mcastEgr.Send` in the hot path for every
    received datagram.
-4. Calls `nack.Tracker.Observe` for BRC-124/BRC-128 frames with non-zero `CurSeq`.
+4. Calls `nack.Tracker.Observe` for BRC-124/BRC-128 frames with non-zero `SeqNum`.
 
 **SO_REUSEPORT and multicast:** Linux does **not** load-balance multicast
 datagrams across SO_REUSEPORT sockets — every socket that has joined the group
@@ -60,41 +60,41 @@ Offset  Size  Align  Field          Value / notes
      6     1   —     Frame version  0x02 (BRC-124/BRC-128)
      7     1   —     Reserved       0x00
      8    32   8B    TxID           raw 256-bit txid (internal byte order)
-    40     8   8B    PrevSeq        XXH64 of previous chain state; 0 = unset
-    48     8   8B    CurSeq         XXH64 of current chain state; 0 = unset
+    40     8   8B    HashKey        stable per-flow XXH64 identifier; 0 = unset
+    48     8   8B    SeqNum         monotonic per-flow counter; 0 = unset
     56    32   8B    SubtreeID      32-byte batch identifier; zeros = unset
     88     4   —     PayloadLen     uint32 BE
     92     *   —     Payload        raw serialised BSV transaction (BRC-12 or BRC-30 EF for BRC-128)
 ```
 
-`PrevSeq` and `CurSeq` form a hash chain: each frame's `PrevSeq` equals the
-`CurSeq` of its predecessor in the sender's per-(sender IP, group, subtree)
-sequence. Both are computed by the proxy (`bitcoin-shard-proxy`) as
-`XXH64(senderIPv6 ∥ groupIdx ∥ subtreeID ∥ monotonicCounter)` and stamped
-in-place before multicast forwarding. Senders (generators) set both to zero.
-Gap tracking is skipped when `CurSeq` is zero.
+`HashKey` is a stable per-flow identifier computed by the proxy as
+`XXH64(senderIPv6 ∥ groupIdx ∥ subtreeID)`. It is constant for all frames
+in a given (sender, group, subtree) flow. `SeqNum` is a monotonic per-flow
+counter starting at 1. Both are stamped in-place by the proxy before multicast
+forwarding. Senders (generators) set both to zero. Gap tracking is skipped
+when `SeqNum` is zero.
 
 ## Gap tracking (NACK / NORM-inspired)
 
-State key: `(groupIdx, subtreeID)`. Per-chain state:
-- `lastCurSeq`: the highest `CurSeq` seen so far for this chain.
-- `pending`: map from `CurSeq` of the last-in-gap frame to a `gapEntry`.
+State key: `HashKey`. Per-flow state:
+- `lastSeqNum`: the highest `SeqNum` seen so far for this flow.
+- `pending`: map from missing `SeqNum` to a `gapEntry`.
 
-Scoping by `subtreeID` ensures sequence chains from different subtrees (batch
-identifiers) are tracked independently; a gap in one subtree does not affect
-another subtree's chain tail.
+Scoping by `HashKey` (which incorporates sender IP, group index, and subtree
+ID) ensures sequence chains from different flows are tracked independently;
+a gap in one flow does not affect another flow's tail.
 
-**Gap detection** (`nack.Tracker.Observe(groupIdx, subtreeID, prevSeq, curSeq, txID)`):
-- If `prevSeq != 0` and `prevSeq > lastCurSeq`: a gap exists (frames with
-  `CurSeq` in `(lastCurSeq, prevSeq]` are missing). A `gapEntry` is added to
-  `pending` keyed by `prevSeq`.
-- If the incoming `curSeq` matches a pending gap key, the gap is auto-closed
+**Gap detection** (`nack.Tracker.Observe(hashKey, seqNum)`):
+- If `seqNum > lastSeqNum + 1`: a gap exists (frames with `SeqNum` in
+  `(lastSeqNum, seqNum)` are missing). A `gapEntry` is added to `pending`
+  for each missing sequence number.
+- If the incoming `seqNum` matches a pending gap key, the gap is auto-closed
   (retransmit arrived inline). `bsl_gaps_suppressed_total` is incremented.
-- Out-of-order or retransmitted frames (`prevSeq < lastCurSeq`) are silently
-  accepted; they never create new gap entries and never regress `lastCurSeq`.
-- `lastCurSeq` only advances forward.
+- Out-of-order or retransmitted frames (`seqNum <= lastSeqNum`) are silently
+  accepted; they never create new gap entries and never regress `lastSeqNum`.
+- `lastSeqNum` only advances forward.
 
-**Gap fill** (`nack.Tracker.Fill(groupIdx, subtreeID, curSeq)`):
+**Gap fill** (`nack.Tracker.Fill(hashKey, seqNum)`):
 - Called when a retransmit arrives via a NACK ACK response. Deletes the
   matching `pending` entry and increments `bsl_gaps_suppressed_total`.
 
@@ -104,9 +104,9 @@ another subtree's chain tail.
 - Entries past `nextAttempt` with `retries < nack-max-retries` are enqueued
   on `nackQueue`. `nextAttempt` is advanced immediately before enqueue to
   prevent the same gap from being re-dispatched before a response arrives.
-- `nackQueue` consumers send 56-byte NACK datagrams (forward by `PrevSeq` +
-  backward by `CurSeq`, both carrying `SubtreeID`) to the current endpoint
-  in the sorted registry.
+- `nackQueue` consumers send 64-byte NACK datagrams (carrying `HashKey`,
+  `StartSeq`, `EndSeq`, and `SubtreeID`) to the current endpoint in the
+  sorted registry.
 
 **NACK escalation** on endpoint response:
 - **ACK**: gap is cancelled (`Fill`); `bsl_gaps_suppressed_total` incremented.
@@ -149,16 +149,16 @@ Filtering is pure (no I/O) and allocation-free on the hot path:
 ## BRC-12 (legacy) frame support
 
 `frame.Decode` accepts both BRC-12 (44-byte header) and BRC-124/BRC-128 (92-byte header) frames.
-BRC-12 frames are decoded with zero-valued `PrevSeq`, `CurSeq`, and `SubtreeID`.
+BRC-12 frames are decoded with zero-valued `HashKey`, `SeqNum`, and `SubtreeID`.
 Shard filtering applies to BRC-12 frames normally; subtree filtering has no effect
 (zero `SubtreeID` passes all include/exclude checks). Gap tracking is skipped
-for BRC-12 frames because `CurSeq` is zero.
+for BRC-12 frames because `SeqNum` is zero.
 
 ## Egress deduplication
 
 When `-egress-dedup-cap` is non-zero, each worker maintains a fixed-capacity
-TTL-bounded set of recently-seen `(groupIdx, subtreeID, curSeq)` keys.
-Before forwarding a BRC-124/BRC-128 frame with a non-zero `CurSeq`, the worker
+TTL-bounded set of recently-seen `(groupIdx, subtreeID, seqNum)` keys.
+Before forwarding a BRC-124/BRC-128 frame with a non-zero `SeqNum`, the worker
 checks the set:
 
 - **First occurrence** — key is inserted; frame is forwarded normally.
@@ -169,7 +169,7 @@ checks the set:
 The set is a ring-buffer + hash-map with O(1) insert and lookup. Entries expire
 after `-egress-dedup-ttl` (default 5 s). When the capacity is reached the
 oldest entry is evicted regardless of TTL. BRC-12 frames and unstamped
-BRC-124/BRC-128 frames (`CurSeq == 0`) bypass dedup entirely.
+BRC-124/BRC-128 frames (`SeqNum == 0`) bypass dedup entirely.
 
 > **Multicast receive:** set `NUM_WORKERS=1` when receiving multicast. Each
 > additional worker holds an independent dedup set; duplicates from multiple

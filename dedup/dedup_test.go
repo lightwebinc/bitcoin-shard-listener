@@ -39,7 +39,7 @@ func TestSeenAndAdd_DistinctKeysAreMisses(t *testing.T) {
 		t.Fatal("different subtree should not collide")
 	}
 	if s.SeenAndAdd(key(0, 0, 2)) {
-		t.Fatal("different curSeq should not collide")
+		t.Fatal("different seqNum should not collide")
 	}
 }
 

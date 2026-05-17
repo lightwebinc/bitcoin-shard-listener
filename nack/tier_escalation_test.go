@@ -47,13 +47,13 @@ func (m *mockEndpoint) run() {
 		}
 		n := m.count.Add(1)
 		resp := nack.MsgTypeMISS
-		var curSeq uint64
+		var seqNum uint64
 		if n > m.missCount {
 			resp = nack.MsgTypeACK
-			curSeq = 200
+			seqNum = 200
 		}
 		var out [nack.ResponseSize]byte
-		nack.EncodeResponse(&nack.Response{MsgType: resp, Flags: 0x01, SeqNum: curSeq}, out[:])
+		nack.EncodeResponse(&nack.Response{MsgType: resp, Flags: 0x01, SeqNum: seqNum}, out[:])
 		_, _ = m.conn.WriteTo(out[:], src)
 	}
 }

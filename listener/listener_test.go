@@ -93,12 +93,12 @@ func buildBRC124Frame(t *testing.T, txid [32]byte, payload []byte) []byte {
 	return buf[:n]
 }
 
-func buildSequencedFrame(t *testing.T, txid [32]byte, payload []byte, curSeq uint64) []byte {
+func buildSequencedFrame(t *testing.T, txid [32]byte, payload []byte, seqNum uint64) []byte {
 	t.Helper()
 	f := &frame.Frame{
 		Version: frame.FrameVerV2,
 		TxID:    txid,
-		SeqNum:  curSeq,
+		SeqNum:  seqNum,
 		Payload: payload,
 	}
 	buf := make([]byte, frame.HeaderSize+len(payload))

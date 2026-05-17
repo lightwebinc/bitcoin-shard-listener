@@ -1,7 +1,7 @@
 // Package dedup implements a fixed-capacity sliding-window deduplicator
 // for downstream egress in bitcoin-shard-listener.
 //
-// Frames are keyed by (groupIdx, subtreeID, curSeq). When a multicast
+// Frames are keyed by (groupIdx, subtreeID, seqNum). When a multicast
 // retransmit arrives after the inline frame has already been forwarded
 // downstream, the dedup set causes the listener to suppress the duplicate
 // before egress while still letting the gap tracker observe it.
