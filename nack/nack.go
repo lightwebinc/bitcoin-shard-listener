@@ -26,12 +26,21 @@ type TrackerConfig struct {
 // Mirrors shard.CtrlGroupControl = 0xFFFE without importing the shard package.
 const ctrlGroupControl uint32 = 0xFFFE
 
-// flowLabel returns "brc131" for block control flows and "brc124" for all others.
+// ctrlGroupSubtreeAnnounce is the reserved group index for BRC-132 subtree data frames.
+// Mirrors shard.CtrlGroupSubtreeAnnounce = 0xFFFB without importing the shard package.
+const ctrlGroupSubtreeAnnounce uint32 = 0xFFFB
+
+// flowLabel returns "brc131" for block control flows, "brc132" for subtree data
+// flows, and "brc124" for all others.
 func flowLabel(groupIdx uint32) string {
-	if groupIdx == ctrlGroupControl {
+	switch groupIdx {
+	case ctrlGroupControl:
 		return "brc131"
+	case ctrlGroupSubtreeAnnounce:
+		return "brc132"
+	default:
+		return "brc124"
 	}
-	return "brc124"
 }
 
 // flowState tracks one active per-flow sequence stream.
