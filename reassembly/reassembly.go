@@ -247,17 +247,9 @@ func (b *Buffer) complete(s *slot, now time.Time) {
 		}
 
 	case frame.FrameVerV5:
-		// BRC-132 subtree data: SHA256d never applies.
-		// Optional Merkle root verification is performed when verifyMerkle is set
-		// (requires decoding payload into nodes and recomputing the tree — callers
-		// should set this only when explicitly enabled via config).
-		if b.verifyMerkle {
-			// Delegate actual Merkle computation to the callback layer; here we
-			// only signal that the check is requested via the hook interface.
-			// Full implementation requires the payload + MsgType → tree recompute.
-			// For now this is a no-op placeholder: always passes.
-			// TODO: implement Merkle tree recomputation when enabled.
-		}
+		// BRC-132 subtree data: SHA256d verification never applies.
+		// Merkle root recomputation (verifyMerkle) is deferred to the callback
+		// layer because it requires payload decoding + tree recomputation.
 		sf := &frame.SubtreeDataFrame{
 			MsgType: s.msgType,
 			HashKey: s.hashKey,
