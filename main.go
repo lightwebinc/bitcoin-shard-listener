@@ -225,6 +225,11 @@ func run() error {
 		buf.SetStartedHook(rec.ReassemblyStarted)
 		buf.SetAbandonedHook(rec.ReassemblyAbandoned)
 		buf.SetHashMismatchHook(rec.ReassemblyHashMismatch)
+		buf.SetBlockCallback(wLocal.DeliverReassembledBlock)
+		buf.SetSubtreeDataCallback(wLocal.DeliverReassembledSubtreeData)
+		if cfg.SubtreeDataVerifyMerkle {
+			buf.SetVerifyMerkle(true)
+		}
 		w.SetReassemblyBuffer(buf)
 		wg.Add(1)
 		go func(worker *listener.Worker) {
@@ -296,6 +301,12 @@ func buildGroups(cfg *config.Config, engine *shard.Engine) ([]*net.UDPAddr, erro
 	// Join the block control group so we receive block announcements.
 	ctrlIP := shard.ControlGroupAddr(cfg.MCPrefix, cfg.MCGroupID, shard.CtrlGroupControl)
 	groups = append(groups, &net.UDPAddr{IP: ctrlIP, Port: cfg.ListenPort})
+
+	// Join the subtree data group when BRC-132 reception is enabled.
+	if cfg.SubtreeDataEnabled {
+		subtreeDataIP := shard.ControlGroupAddr(cfg.MCPrefix, cfg.MCGroupID, shard.CtrlGroupSubtreeAnnounce)
+		groups = append(groups, &net.UDPAddr{IP: subtreeDataIP, Port: cfg.ListenPort})
+	}
 
 	return groups, nil
 }

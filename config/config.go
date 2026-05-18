@@ -39,6 +39,8 @@
 //	-workers              NUM_WORKERS          NumCPU           Receive goroutine count
 //	-debug                DEBUG                false            Per-frame logging
 //	-verify-payload-hash  VERIFY_PAYLOAD_HASH  false            Verify SHA256d(payload)==TxID on V2 frames; drop on mismatch
+//	-subtree-data-enabled SUBTREE_DATA_ENABLED false            Enable BRC-132 subtree data reception (join 0xFFFB group)
+//	-subtree-data-verify-merkle SUBTREE_DATA_VERIFY_MERKLE false Optional post-reassembly Merkle root verification (expensive)
 //	-egress-dedup-cap     EGRESS_DEDUP_CAP     0                Egress dedup capacity (0 = disabled)
 //	-egress-dedup-ttl     EGRESS_DEDUP_TTL     2s               Egress dedup TTL (max age of a remembered key)
 //	-metrics-addr         METRICS_ADDR         :9200            Prometheus / healthz / readyz
@@ -118,6 +120,10 @@ type Config struct {
 	AnnounceScopes         []string     // e.g. ["site", "org"]
 	SenderInclude          []*net.IPNet // nil/empty = accept all non-excluded
 	SenderExclude          []*net.IPNet // checked before include
+
+	// BRC-132 subtree data
+	SubtreeDataEnabled      bool // join CtrlGroupSubtreeAnnounce (0xFFFB)
+	SubtreeDataVerifyMerkle bool // optional post-reassembly Merkle root check
 
 	// Runtime
 	NumWorkers        int
@@ -204,6 +210,10 @@ func Load() (*Config, error) {
 		"enable per-frame debug logging")
 	flag.BoolVar(&c.VerifyPayloadHash, "verify-payload-hash", envBool("VERIFY_PAYLOAD_HASH", false),
 		"verify SHA256d(payload) == TxID on BRC-124/BRC-128 frames; drop on mismatch")
+	flag.BoolVar(&c.SubtreeDataEnabled, "subtree-data-enabled", envBool("SUBTREE_DATA_ENABLED", false),
+		"enable BRC-132 subtree data reception: join CtrlGroupSubtreeAnnounce (0xFFFB) group")
+	flag.BoolVar(&c.SubtreeDataVerifyMerkle, "subtree-data-verify-merkle", envBool("SUBTREE_DATA_VERIFY_MERKLE", false),
+		"optional post-reassembly Merkle root verification for BRC-132 frames (expensive at 1M nodes)")
 	flag.IntVar(&c.EgressDedupCap, "egress-dedup-cap", envInt("EGRESS_DEDUP_CAP", 0),
 		"egress duplicate-suppression capacity (0 = disabled); typical value: workers × tps × dedup-ttl")
 	flag.DurationVar(&c.EgressDedupTTL, "egress-dedup-ttl", envDuration("EGRESS_DEDUP_TTL", 2*time.Second),

@@ -144,6 +144,26 @@ func (s *Sender) SendBlock(raw []byte, bf *frame.BlockFrame) error {
 	}
 }
 
+// SendSubtreeData forwards a BRC-132 subtree data frame to the downstream.
+// When stripHeader is true, only sf.Payload is sent; otherwise the full raw
+// wire buffer is forwarded.
+func (s *Sender) SendSubtreeData(raw []byte, sf *frame.SubtreeDataFrame) error {
+	var buf []byte
+	if s.stripHeader {
+		buf = sf.Payload
+	} else {
+		buf = raw
+	}
+	switch s.proto {
+	case "udp":
+		return s.sendUDP(buf)
+	case "tcp":
+		return s.sendTCP(buf)
+	default:
+		return fmt.Errorf("egress: unknown protocol %q", s.proto)
+	}
+}
+
 // Proto returns the configured egress protocol ("udp" or "tcp").
 func (s *Sender) Proto() string { return s.proto }
 

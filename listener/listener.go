@@ -198,6 +198,12 @@ func (w *Worker) processFrame(raw []byte) {
 		return
 	}
 
+	// BRC-132 subtree data frame (FrameVer 0x05): route to subtree data handler.
+	if frame.IsSubtreeDataFrame(raw) {
+		w.processSubtreeDataFrame(raw)
+		return
+	}
+
 	// BRC-130 fragment: route to reassembly buffer and return.
 	if frame.IsFragment(raw) {
 		if w.reassemBuf == nil {
@@ -370,6 +376,141 @@ func (w *Worker) processBlockFrame(raw []byte) {
 			"msg_type", bf.MsgType,
 			"content_id", fmt.Sprintf("%x", bf.ContentID[:8]),
 			"seq_num", bf.SeqNum,
+		)
+	}
+}
+
+// processSubtreeDataFrame handles BRC-132 subtree data frames (FrameVer 0x05).
+// Subtree data frames bypass shard/subtree filtering and are forwarded directly
+// to egress. Gap tracking is performed on the (HashKey, 0xFFFB, subtreeID) flow.
+func (w *Worker) processSubtreeDataFrame(raw []byte) {
+	sf, err := frame.DecodeSubtreeData(raw)
+	if err != nil {
+		if w.rec != nil {
+			w.rec.FrameDropped(w.id, "decode_error")
+		}
+		if w.debug {
+			w.log.Debug("subtree data frame decode error", "err", err, "len", len(raw))
+		}
+		return
+	}
+
+	if w.rec != nil {
+		w.rec.FrameReceived(w.id, w.iface.Name, "brc132")
+	}
+
+	if err := w.egr.SendSubtreeData(raw, sf); err != nil {
+		if w.rec != nil {
+			w.rec.EgressError(w.id)
+		}
+		w.log.Debug("subtree data egress send error", "err", err)
+	} else {
+		if w.rec != nil {
+			w.rec.FrameForwarded(w.id, w.egr.Proto())
+		}
+	}
+
+	// Gap tracking on the subtree data flow uses SubtreeID as the flow scope.
+	if w.tracker != nil && sf.SeqNum != 0 {
+		w.tracker.Observe(uint32(shard.CtrlGroupSubtreeAnnounce), sf.SubtreeID, sf.HashKey, sf.SeqNum, sf.SubtreeID)
+	}
+
+	if w.debug {
+		w.log.Debug("subtree data frame forwarded",
+			"msg_type", sf.MsgType,
+			"subtree_id", fmt.Sprintf("%x", sf.SubtreeID[:8]),
+			"seq_num", sf.SeqNum,
+		)
+	}
+}
+
+// DeliverReassembledBlock is the reassembly.BlockCallback invoked when a V4
+// (BRC-131) fragment set completes reassembly. bf carries the reconstructed
+// block frame metadata; the payload is the full reassembled BRC-131 payload.
+// This method is called with the Buffer's lock held.
+func (w *Worker) DeliverReassembledBlock(payload []byte, bf *frame.BlockFrame) {
+	if w.rec != nil {
+		w.rec.ReassemblyCompleted()
+	}
+
+	// Re-encode as BRC-131 so the Sender has a valid wire buffer.
+	raw := make([]byte, frame.HeaderSize+len(payload))
+	if _, err := frame.EncodeBlock(bf, raw); err != nil {
+		if w.debug {
+			w.log.Debug("reassembled block frame encode error", "err", err)
+		}
+		return
+	}
+
+	if w.rec != nil {
+		w.rec.FrameReceived(w.id, w.iface.Name, "brc131_reassembled")
+	}
+
+	if err := w.egr.SendBlock(raw, bf); err != nil {
+		if w.rec != nil {
+			w.rec.EgressError(w.id)
+		}
+		w.log.Debug("reassembled block egress send error", "err", err)
+	} else {
+		if w.rec != nil {
+			w.rec.FrameForwarded(w.id, w.egr.Proto())
+		}
+	}
+
+	if w.tracker != nil && bf.SeqNum != 0 {
+		var zeroSub [32]byte
+		w.tracker.Observe(uint32(shard.CtrlGroupControl), zeroSub, bf.HashKey, bf.SeqNum, bf.ContentID)
+	}
+
+	if w.debug {
+		w.log.Debug("reassembled block frame forwarded",
+			"msg_type", bf.MsgType,
+			"content_id", fmt.Sprintf("%x", bf.ContentID[:8]),
+		)
+	}
+}
+
+// DeliverReassembledSubtreeData is the reassembly.SubtreeDataCallback invoked
+// when a V5 (BRC-132) fragment set completes reassembly. sf carries the
+// reconstructed subtree data frame metadata. SHA256d verification is never
+// applied for V5 slots. This method is called with the Buffer's lock held.
+func (w *Worker) DeliverReassembledSubtreeData(payload []byte, sf *frame.SubtreeDataFrame) {
+	if w.rec != nil {
+		w.rec.ReassemblyCompleted()
+	}
+
+	// Re-encode as BRC-132 so the Sender has a valid wire buffer.
+	raw := make([]byte, frame.HeaderSize+len(payload))
+	if _, err := frame.EncodeSubtreeData(sf, raw); err != nil {
+		if w.debug {
+			w.log.Debug("reassembled subtree data frame encode error", "err", err)
+		}
+		return
+	}
+
+	if w.rec != nil {
+		w.rec.FrameReceived(w.id, w.iface.Name, "brc132_reassembled")
+	}
+
+	if err := w.egr.SendSubtreeData(raw, sf); err != nil {
+		if w.rec != nil {
+			w.rec.EgressError(w.id)
+		}
+		w.log.Debug("reassembled subtree data egress send error", "err", err)
+	} else {
+		if w.rec != nil {
+			w.rec.FrameForwarded(w.id, w.egr.Proto())
+		}
+	}
+
+	if w.tracker != nil && sf.SeqNum != 0 {
+		w.tracker.Observe(uint32(shard.CtrlGroupSubtreeAnnounce), sf.SubtreeID, sf.HashKey, sf.SeqNum, sf.SubtreeID)
+	}
+
+	if w.debug {
+		w.log.Debug("reassembled subtree data frame forwarded",
+			"msg_type", sf.MsgType,
+			"subtree_id", fmt.Sprintf("%x", sf.SubtreeID[:8]),
 		)
 	}
 }

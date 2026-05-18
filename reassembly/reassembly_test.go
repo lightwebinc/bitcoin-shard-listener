@@ -336,6 +336,151 @@ func TestReassembly_MetadataMismatch_Ignored(t *testing.T) {
 	}
 }
 
+// buildFragFrameWithVer constructs a *frame.FragFrame with origFrameVer and msgType set.
+func buildFragFrameWithVer(txID [32]byte, origLen uint32, idx, total uint16, data []byte, origFrameVer, msgType byte) *frame.FragFrame {
+	cp := make([]byte, len(data))
+	copy(cp, data)
+	return &frame.FragFrame{
+		TxID:           txID,
+		HashKey:        0xDEADBEEFCAFEBABE,
+		SeqNum:         uint64(idx) + 1,
+		OrigPayloadLen: origLen,
+		FragIndex:      idx,
+		FragTotal:      total,
+		FragData:       cp,
+		OrigFrameVer:   origFrameVer,
+		MsgType:        msgType,
+	}
+}
+
+func TestReassembly_V4BlockCallback(t *testing.T) {
+	payload := []byte("block-announce-payload-data")
+	var txID [32]byte
+	for i := range txID {
+		txID[i] = byte(i + 1) // ContentID (BlockHash)
+	}
+
+	var gotPayload []byte
+	var gotBF *frame.BlockFrame
+	b := New(16, time.Second, false, nil)
+	b.SetBlockCallback(func(p []byte, bf *frame.BlockFrame) {
+		gotPayload = p
+		gotBF = bf
+	})
+
+	ff := buildFragFrameWithVer(txID, uint32(len(payload)), 0, 1, payload, frame.FrameVerV4, frame.BlockMsgAnnounce)
+	b.Observe(ff)
+
+	if gotBF == nil {
+		t.Fatal("BlockCallback not called")
+	}
+	if !bytes.Equal(gotPayload, payload) {
+		t.Errorf("payload mismatch: got %q, want %q", gotPayload, payload)
+	}
+	if gotBF.MsgType != frame.BlockMsgAnnounce {
+		t.Errorf("MsgType: got 0x%02X, want 0x%02X", gotBF.MsgType, frame.BlockMsgAnnounce)
+	}
+	if gotBF.ContentID != txID {
+		t.Errorf("ContentID mismatch")
+	}
+	if gotBF.HashKey != 0xDEADBEEFCAFEBABE {
+		t.Errorf("HashKey mismatch: got %d", gotBF.HashKey)
+	}
+}
+
+func TestReassembly_V5SubtreeDataCallback(t *testing.T) {
+	payload := make([]byte, 128)
+	for i := range payload {
+		payload[i] = byte(i & 0xFF)
+	}
+	var subtreeID [32]byte
+	for i := range subtreeID {
+		subtreeID[i] = byte(i + 10) // SubtreeID (Merkle root)
+	}
+
+	var gotPayload []byte
+	var gotSF *frame.SubtreeDataFrame
+	b := New(16, time.Second, false, nil)
+	b.SetSubtreeDataCallback(func(p []byte, sf *frame.SubtreeDataFrame) {
+		gotPayload = p
+		gotSF = sf
+	})
+
+	ff := buildFragFrameWithVer(subtreeID, uint32(len(payload)), 0, 1, payload, frame.FrameVerV5, frame.SubtreeMsgHashesOnly)
+	b.Observe(ff)
+
+	if gotSF == nil {
+		t.Fatal("SubtreeDataCallback not called")
+	}
+	if !bytes.Equal(gotPayload, payload) {
+		t.Errorf("payload mismatch")
+	}
+	if gotSF.MsgType != frame.SubtreeMsgHashesOnly {
+		t.Errorf("MsgType: got 0x%02X, want 0x%02X", gotSF.MsgType, frame.SubtreeMsgHashesOnly)
+	}
+	if gotSF.SubtreeID != subtreeID {
+		t.Errorf("SubtreeID mismatch")
+	}
+	if gotSF.HashKey != 0xDEADBEEFCAFEBABE {
+		t.Errorf("HashKey mismatch: got %d", gotSF.HashKey)
+	}
+}
+
+func TestReassembly_V5NoSHA256dVerification(t *testing.T) {
+	// For V5 frames, SHA256d verification must NOT be applied even when
+	// verifyHash=true, because SubtreeID is a Merkle root, not a payload hash.
+	payload := []byte("subtree-data-payload")
+	var subtreeID [32]byte
+	subtreeID[0] = 0xAB // deliberately not SHA256d(payload)
+
+	called := false
+	b := New(16, time.Second, true /* verifyHash=true */, nil)
+	b.SetSubtreeDataCallback(func(p []byte, sf *frame.SubtreeDataFrame) {
+		called = true
+	})
+	hashMismatch := false
+	b.SetHashMismatchHook(func() { hashMismatch = true })
+
+	ff := buildFragFrameWithVer(subtreeID, uint32(len(payload)), 0, 1, payload, frame.FrameVerV5, frame.SubtreeMsgHashesOnly)
+	b.Observe(ff)
+
+	if !called {
+		t.Error("SubtreeDataCallback not called: SHA256d was incorrectly applied to V5 slot")
+	}
+	if hashMismatch {
+		t.Error("hash_mismatch hook fired for V5 slot: SHA256d must not be applied")
+	}
+}
+
+func TestReassembly_V5MultiFragment(t *testing.T) {
+	chunk1 := bytes.Repeat([]byte{0xAA}, 500)
+	chunk2 := bytes.Repeat([]byte{0xBB}, 300)
+	var subtreeID [32]byte
+	subtreeID[7] = 0xFF
+
+	var gotPayload []byte
+	b := New(16, time.Second, false, nil)
+	b.SetSubtreeDataCallback(func(p []byte, sf *frame.SubtreeDataFrame) {
+		gotPayload = p
+	})
+
+	origLen := uint32(len(chunk1) + len(chunk2))
+	ff0 := buildFragFrameWithVer(subtreeID, origLen, 0, 2, chunk1, frame.FrameVerV5, frame.SubtreeMsgFullNodes)
+	ff1 := buildFragFrameWithVer(subtreeID, origLen, 1, 2, chunk2, frame.FrameVerV5, frame.SubtreeMsgFullNodes)
+	b.Observe(ff0)
+	if gotPayload != nil {
+		t.Error("callback should not fire after fragment 0 of 2")
+	}
+	b.Observe(ff1)
+	if gotPayload == nil {
+		t.Fatal("SubtreeDataCallback not called after all fragments")
+	}
+	want := append(chunk1, chunk2...)
+	if !bytes.Equal(gotPayload, want) {
+		t.Errorf("payload mismatch: len got=%d want=%d", len(gotPayload), len(want))
+	}
+}
+
 // TestValidateFragment is a sanity check on the validation guard.
 func TestValidateFragment(t *testing.T) {
 	ff := &frame.FragFrame{FragTotal: 3, FragIndex: 1}
