@@ -349,23 +349,27 @@ func (r *Recorder) MCEgressError(workerID int) {
 }
 
 // GapDetected records a newly detected sequence gap.
-func (r *Recorder) GapDetected() {
-	r.gapsDetected.Add(context.Background(), 1)
+// flow identifies the frame type: "brc131" for block control frames, "brc124" otherwise.
+func (r *Recorder) GapDetected(flow string) {
+	r.gapsDetected.Add(context.Background(), 1, metric.WithAttributes(attribute.String("flow", flow)))
 }
 
 // GapSuppressed records a gap cancelled by a retransmit fill or ACK response.
-func (r *Recorder) GapSuppressed() {
-	r.gapsSuppressed.Add(context.Background(), 1)
+// flow identifies the frame type: "brc131" for block control frames, "brc124" otherwise.
+func (r *Recorder) GapSuppressed(flow string) {
+	r.gapsSuppressed.Add(context.Background(), 1, metric.WithAttributes(attribute.String("flow", flow)))
 }
 
 // NACKDispatched records a NACK datagram sent to a retry endpoint.
-func (r *Recorder) NACKDispatched() {
-	r.nacksDispatched.Add(context.Background(), 1)
+// flow identifies the frame type: "brc131" for block control frames, "brc124" otherwise.
+func (r *Recorder) NACKDispatched(flow string) {
+	r.nacksDispatched.Add(context.Background(), 1, metric.WithAttributes(attribute.String("flow", flow)))
 }
 
 // GapUnrecovered records a gap evicted after retries exhausted or TTL exceeded.
-func (r *Recorder) GapUnrecovered() {
-	r.nacksUnrecovered.Add(context.Background(), 1)
+// flow identifies the frame type: "brc131" for block control frames, "brc124" otherwise.
+func (r *Recorder) GapUnrecovered(flow string) {
+	r.nacksUnrecovered.Add(context.Background(), 1, metric.WithAttributes(attribute.String("flow", flow)))
 }
 
 // SubtreeAnnounceReceived records a valid SubtreeAnnounce datagram processed.

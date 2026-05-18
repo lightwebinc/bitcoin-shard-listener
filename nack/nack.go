@@ -22,6 +22,18 @@ type TrackerConfig struct {
 	SeqResetThreshold uint64        // If seqNum <= threshold on an established flow, treat as proxy restart (default 100)
 }
 
+// ctrlGroupControl is the reserved group index for BRC-131 block control frames.
+// Mirrors shard.CtrlGroupControl = 0xFFFE without importing the shard package.
+const ctrlGroupControl uint32 = 0xFFFE
+
+// flowLabel returns "brc131" for block control flows and "brc124" for all others.
+func flowLabel(groupIdx uint32) string {
+	if groupIdx == ctrlGroupControl {
+		return "brc131"
+	}
+	return "brc124"
+}
+
 // flowState tracks one active per-flow sequence stream.
 //
 // Flows are keyed by hashKey = XXH64(senderIPv6 || groupIdx || subtreeID).
@@ -30,6 +42,7 @@ type flowState struct {
 	lastSeqNum uint64
 	groupIdx   uint32
 	subtreeID  [32]byte
+	flowType   string               // "brc131" or "brc124"
 	pending    map[uint64]*gapEntry // keyed by missing seqNum
 	lastSeen   time.Time
 }
@@ -125,6 +138,7 @@ func (t *Tracker) Observe(groupIdx uint32, subtreeID [32]byte, hashKey, seqNum u
 		fs = &flowState{
 			groupIdx:  groupIdx,
 			subtreeID: subtreeID,
+			flowType:  flowLabel(groupIdx),
 			pending:   make(map[uint64]*gapEntry),
 		}
 		t.flows[hashKey] = fs
@@ -135,7 +149,7 @@ func (t *Tracker) Observe(groupIdx uint32, subtreeID [32]byte, hashKey, seqNum u
 	if _, found := fs.pending[seqNum]; found {
 		delete(fs.pending, seqNum)
 		if t.rec != nil {
-			t.rec.GapSuppressed()
+			t.rec.GapSuppressed(fs.flowType)
 		}
 		// Fall through: update lastSeqNum if this advances the stream.
 	}
@@ -161,7 +175,7 @@ func (t *Tracker) Observe(groupIdx uint32, subtreeID [32]byte, hashKey, seqNum u
 			for _, e := range fs.pending {
 				_ = e // gaps from previous proxy lifetime; drop silently
 				if t.rec != nil {
-					t.rec.GapUnrecovered()
+					t.rec.GapUnrecovered(fs.flowType)
 				}
 			}
 			fs.pending = make(map[uint64]*gapEntry)
@@ -191,7 +205,7 @@ func (t *Tracker) Observe(groupIdx uint32, subtreeID [32]byte, hashKey, seqNum u
 			}
 			fs.pending[missing] = e
 			if t.rec != nil {
-				t.rec.GapDetected()
+				t.rec.GapDetected(fs.flowType)
 			}
 		}
 	}
@@ -212,7 +226,7 @@ func (t *Tracker) Fill(hashKey, seqNum uint64) {
 		if _, found := fs.pending[seqNum]; found {
 			delete(fs.pending, seqNum)
 			if t.rec != nil {
-				t.rec.GapSuppressed()
+				t.rec.GapSuppressed(fs.flowType)
 			}
 		}
 	}
@@ -254,7 +268,7 @@ func (t *Tracker) sweepOnce(now time.Time) {
 			if now.After(e.deadline) {
 				delete(fs.pending, seq)
 				if t.rec != nil {
-					t.rec.GapUnrecovered()
+					t.rec.GapUnrecovered(fs.flowType)
 				}
 				t.log.Debug("gap evicted (TTL)",
 					"hash_key", hk,
@@ -265,7 +279,7 @@ func (t *Tracker) sweepOnce(now time.Time) {
 			if e.retries >= t.cfg.MaxRetries {
 				delete(fs.pending, seq)
 				if t.rec != nil {
-					t.rec.GapUnrecovered()
+					t.rec.GapUnrecovered(fs.flowType)
 				}
 				t.log.Debug("gap evicted (retries)",
 					"hash_key", hk,
@@ -361,7 +375,7 @@ func (t *Tracker) sendNACK(e *gapEntry) {
 	_, _ = conn.WriteTo(buf[:], addr)
 
 	if t.rec != nil {
-		t.rec.NACKDispatched()
+		t.rec.NACKDispatched(flowLabel(e.groupIdx))
 	}
 	t.log.Debug("NACK dispatched",
 		"endpoint", endpoint.Addr,
@@ -466,7 +480,7 @@ func (t *Tracker) cancelGap(e *gapEntry) {
 		if _, found := fs.pending[e.seqNum]; found {
 			delete(fs.pending, e.seqNum)
 			if t.rec != nil {
-				t.rec.GapSuppressed()
+				t.rec.GapSuppressed(flowLabel(e.groupIdx))
 			}
 		}
 	}

@@ -192,6 +192,12 @@ func (w *Worker) Run(ctx context.Context) error {
 }
 
 func (w *Worker) processFrame(raw []byte) {
+	// BRC-131 block control frame (FrameVer 0x04): route to block handler.
+	if frame.IsBlockFrame(raw) {
+		w.processBlockFrame(raw)
+		return
+	}
+
 	// BRC-130 fragment: route to reassembly buffer and return.
 	if frame.IsFragment(raw) {
 		if w.reassemBuf == nil {
@@ -317,6 +323,53 @@ func (w *Worker) processFrame(raw []byte) {
 			"version", f.Version,
 			"group", groupIdx,
 			"seq_num", f.SeqNum,
+		)
+	}
+}
+
+// processBlockFrame handles BRC-131 block control frames (FrameVer 0x04).
+// Block frames bypass shard/subtree filtering (they carry block metadata, not
+// transactions) and are forwarded directly to egress. Gap tracking is performed
+// on the block control flow so NACK-based retransmission can recover lost
+// block announcements.
+func (w *Worker) processBlockFrame(raw []byte) {
+	bf, err := frame.DecodeBlock(raw)
+	if err != nil {
+		if w.rec != nil {
+			w.rec.FrameDropped(w.id, "decode_error")
+		}
+		if w.debug {
+			w.log.Debug("block frame decode error", "err", err, "len", len(raw))
+		}
+		return
+	}
+
+	if w.rec != nil {
+		w.rec.FrameReceived(w.id, w.iface.Name, "brc131")
+	}
+
+	if err := w.egr.SendBlock(raw, bf); err != nil {
+		if w.rec != nil {
+			w.rec.EgressError(w.id)
+		}
+		w.log.Debug("block egress send error", "err", err)
+	} else {
+		if w.rec != nil {
+			w.rec.FrameForwarded(w.id, w.egr.Proto())
+		}
+	}
+
+	// Gap tracking on the control flow uses a zero SubtreeID.
+	if w.tracker != nil && bf.SeqNum != 0 {
+		var zeroSub [32]byte
+		w.tracker.Observe(uint32(shard.CtrlGroupControl), zeroSub, bf.HashKey, bf.SeqNum, bf.ContentID)
+	}
+
+	if w.debug {
+		w.log.Debug("block frame forwarded",
+			"msg_type", bf.MsgType,
+			"content_id", fmt.Sprintf("%x", bf.ContentID[:8]),
+			"seq_num", bf.SeqNum,
 		)
 	}
 }

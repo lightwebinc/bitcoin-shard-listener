@@ -275,6 +275,8 @@ func run() error {
 
 // buildGroups returns the multicast group addresses this instance should join.
 // If ShardInclude is set, only those groups are joined; otherwise all groups.
+// The block control group (FF0E::B:FFFE) is always appended so block
+// announcements are received regardless of shard filtering.
 func buildGroups(cfg *config.Config, engine *shard.Engine) ([]*net.UDPAddr, error) {
 	var indices []uint32
 	if len(cfg.ShardInclude) > 0 {
@@ -285,10 +287,15 @@ func buildGroups(cfg *config.Config, engine *shard.Engine) ([]*net.UDPAddr, erro
 			indices[i] = uint32(i)
 		}
 	}
-	groups := make([]*net.UDPAddr, 0, len(indices))
+	groups := make([]*net.UDPAddr, 0, len(indices)+1)
 	for _, idx := range indices {
 		addr := engine.Addr(idx, cfg.ListenPort)
 		groups = append(groups, addr)
 	}
+
+	// Join the block control group so we receive block announcements.
+	ctrlIP := shard.ControlGroupAddr(cfg.MCPrefix, cfg.MCGroupID, shard.CtrlGroupControl)
+	groups = append(groups, &net.UDPAddr{IP: ctrlIP, Port: cfg.ListenPort})
+
 	return groups, nil
 }
