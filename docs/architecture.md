@@ -3,39 +3,50 @@
 ## Overview
 
 `bitcoin-shard-listener` sits downstream of `bitcoin-shard-proxy` in the BSV
-transaction distribution pipeline. The proxy multicasts BRC-124/BRC-128 frames onto an
-IPv6 multicast fabric; the listener joins the relevant groups, filters frames
-by shard index and/or subtree ID, forwards matching frames to a configurable
-unicast downstream over UDP or TCP and/or re-emits them via multicast egress
-(domain bridging), and performs NORM-inspired NACK-based gap recovery.
+transaction distribution pipeline. The proxy multicasts BRC-124/BRC-128 transaction frames
+and BRC-131/BRC-132 control-plane frames onto an IPv6 multicast fabric; the listener joins
+the relevant groups, filters transaction frames by shard index and/or subtree ID, forwards
+matching frames to a configurable unicast downstream over UDP or TCP and/or re-emits them
+via multicast egress (domain bridging), and performs NORM-inspired NACK-based gap recovery.
 
 ```
 BSV senders
    │ (TCP or UDP ingress)
    ▼
 bitcoin-shard-proxy
-   │ BRC-124/BRC-128 frames, HashKey/SeqNum stamped in-place at bytes 40–55
-   │ IPv6 multicast  FF05::<group-index>
+   │ BRC-124/BRC-128 frames → FF05::B:<shard>      (data plane)
+   │ BRC-131 frames         → FF05::B:FFFE          (CtrlGroupControl)
+   │ BRC-132 frames         → FF05::B:FFFB          (CtrlGroupSubtreeAnnounce)
    ▼
 Multicast fabric (site-scoped FF05::/16)
    │
-   ├── direct subscribers (miners, exchanges, …)
-   │
-   └── bitcoin-shard-listener
-          │ filter → egress
-          ├──▶ unicast UDP/TCP → downstream consumers
-          └──▶ multicast egress (optional) → bridged domain
+   ├── FF05::B:<shard>   BRC-124/BRC-128 transaction frames
+   ├── FF05::B:FFFE      BRC-131 block control (always joined)
+   ├── FF05::B:FFFB      BRC-132 subtree data (when -subtree-data-enabled)
+   └── FF05::B:FFFD      BRC-126 ADVERT beacon
+       │
+       └── bitcoin-shard-listener
+              ├──▶ unicast UDP/TCP → downstream consumers
+              ├──▶ multicast egress (optional) → bridged domain
+              ├──▶ header egress (BRC-131 BlockAnnounce only, optional)
+              └──▶ NACK gap tracking (shard flows + control-plane flows)
 ```
 
 ## Receive workers
 
 Each worker:
 1. Opens a UDP socket with `SO_REUSEPORT` on the configured listen port.
-2. Joins all configured multicast groups on the configured interface.
-3. Calls `frame.Decode`, `shard.Engine.GroupIndex`, `filter.Allow`,
-   `egress.Send`, and optionally `mcastEgr.Send` in the hot path for every
-   received datagram.
-4. Calls `nack.Tracker.Observe` for BRC-124/BRC-128 frames with non-zero `SeqNum`.
+2. Joins all configured multicast groups on the configured interface (shard groups +
+   `CtrlGroupControl` always; `CtrlGroupSubtreeAnnounce` when `-subtree-data-enabled`).
+3. Dispatches each received datagram via `processFrame`, which branches on the frame
+   version byte before decode:
+   - `FrameVerV4` (0x04) → `processBlockFrame` (BRC-131)
+   - `FrameVerV5` (0x05) → `processSubtreeDataFrame` (BRC-132)
+   - `FrameVerV3` (0x03) → fragment reassembly buffer (`Buffer.Observe`)
+   - Otherwise → BRC-12/BRC-124/BRC-128 hot path: `frame.Decode`, `shard.Engine.GroupIndex`,
+     `filter.Allow`, `egress.Send`, optionally `mcastEgr.Send`
+4. Calls `nack.Tracker.Observe` for BRC-124/BRC-128 frames with non-zero `SeqNum`,
+   and for BRC-131/BRC-132 frames on their respective control-plane flow keys.
 
 **SO_REUSEPORT and multicast:** Linux does **not** load-balance multicast
 datagrams across SO_REUSEPORT sockets — every socket that has joined the group
@@ -153,6 +164,74 @@ BRC-12 frames are decoded with zero-valued `HashKey`, `SeqNum`, and `SubtreeID`.
 Shard filtering applies to BRC-12 frames normally; subtree filtering has no effect
 (zero `SubtreeID` passes all include/exclude checks). Gap tracking is skipped
 for BRC-12 frames because `SeqNum` is zero.
+
+## Control Group Address Table
+
+| Constant | Index | Address (site scope, group-id `0x000B`) | Purpose |
+|---|---|---|---|
+| `CtrlGroupBlockHeader` | 0xFFFA | FF05::B:FFFA | Block header egress channel (stripped BRC-131 headers) |
+| `CtrlGroupSubtreeAnnounce` | 0xFFFB | FF05::B:FFFB | BRC-127 SubtreeAnnounce datagrams + BRC-132 subtree data |
+| `CtrlGroupSubtreeGroupAnnounce` | 0xFFFC | FF05::B:FFFC | BRC-127 subtree group membership announcements |
+| `CtrlGroupBeacon` | 0xFFFD | FF05::B:FFFD | ADVERT beacon (BRC-126 discovery) |
+| `CtrlGroupControl` | 0xFFFE | FF05::B:FFFE | BRC-131 block control frames |
+
+The listener always joins `CtrlGroupControl` and `CtrlGroupBeacon`. It joins
+`CtrlGroupSubtreeAnnounce` only when `-subtree-data-enabled=true`.
+
+## BRC-131 Block Control Frame Processing
+
+`CtrlGroupControl` (0xFFFE) is joined at startup unconditionally. BRC-131 frames
+received on this group are dispatched to `processBlockFrame`:
+
+1. Calls `frame.DecodeBlock` to validate and extract block fields.
+2. Bypasses the shard/subtree filter (block frames carry no TxID; filtering would be meaningless).
+3. Forwards the raw frame via `egress.Sender.SendBlock` to the configured downstream.
+4. Calls `nack.Tracker.Observe(uint32(CtrlGroupControl), zeroSubtreeID, bf.HashKey, bf.SeqNum, bf.ContentID)`
+   for gap tracking on the block control flow.
+
+**Block header egress:** when `-header-egress-enabled=true`, `processBlockFrame` additionally
+calls `emitBlockHeader` for `BlockAnnounce` (MsgType 0x01) frames. `emitBlockHeader` extracts
+the first 80 bytes of the payload (raw block header), re-encodes them as a stripped 172-byte
+BRC-131 frame (92-byte header + 80-byte payload), and sends it to the configured unicast
+header egress endpoint.
+
+When `-header-mc-egress-enabled=true`, the stripped header frame is also re-emitted to
+`CtrlGroupBlockHeader` (0xFFFA), allowing SPV consumers to join only that group.
+
+**Reassembly:** fragmented BRC-131 payloads arrive as BRC-130 fragments with `OrigFrameVer=0x04`.
+The reassembly buffer's `BlockCallback` is called when all fragments arrive; the completed payload
+is delivered via `DeliverReassembledBlock`, which re-encodes it as a valid wire buffer using
+`frame.EncodeBlock` before forwarding.
+
+## BRC-132 Subtree Data Frame Processing
+
+`CtrlGroupSubtreeAnnounce` (0xFFFB) is joined only when `-subtree-data-enabled=true`.
+BRC-132 frames on this group are dispatched to `processSubtreeDataFrame`:
+
+1. Calls `frame.DecodeSubtreeData` to validate and extract subtree fields.
+2. Bypasses the shard/subtree filter.
+3. Forwards the raw frame via `egress.Sender.SendSubtreeData` to the configured downstream.
+4. Calls `nack.Tracker.Observe(uint32(CtrlGroupSubtreeAnnounce), sf.SubtreeID, sf.HashKey, sf.SeqNum, sf.SubtreeID)`
+   for gap tracking. Each distinct `SubtreeID` is sequenced independently.
+
+The listener forwards the raw payload without parsing. `MsgType` `0x01` = hashes-only
+(32 bytes per node), `0x02` = full-nodes (48 bytes per node); both are forwarded verbatim.
+
+**Reassembly:** fragmented BRC-132 payloads arrive as BRC-130 fragments with `OrigFrameVer=0x05`.
+The reassembly buffer's `SubtreeDataCallback` is called on completion. Optional post-reassembly
+Merkle root verification is applied if `-subtree-data-verify-merkle=true`. The completed payload
+is delivered via `DeliverReassembledSubtreeData`, which re-encodes it via `frame.EncodeSubtreeData`
+before forwarding.
+
+## Fragment Reassembly Callbacks
+
+Three callback types are registered on the reassembly buffer (`reassembly.Buffer`):
+
+| Callback | Frame version | Triggered by | Delivers to |
+|---|---|---|---|
+| `Callback` | V2 (BRC-124/BRC-128) | Fragment set complete | BRC-124/128 egress path; optional SHA256d verification |
+| `BlockCallback` | V4 (BRC-131) | Fragment set complete | `DeliverReassembledBlock` |
+| `SubtreeDataCallback` | V5 (BRC-132) | Fragment set complete | Merkle verify if enabled → `DeliverReassembledSubtreeData` |
 
 ## Egress deduplication
 

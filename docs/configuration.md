@@ -153,6 +153,54 @@ multicast delivery (requires PIM or similar on intermediate routers).
 
 ---
 
+## Block Header Egress (BRC-131)
+
+When BRC-131 block control frames are received, the listener can extract the 80-byte block
+header from `BlockAnnounce` frames and re-emit it as a stripped 172-byte BRC-131 frame
+(92-byte header + 80-byte payload). This provides a lightweight SPV consumer path without
+requiring consumers to process full block announcement payloads. Header egress runs
+independently of the normal unicast egress (`-egress-addr`); both can be active simultaneously.
+
+### `-header-egress-enabled` / `HEADER_EGRESS_ENABLED` (default: `false`)
+
+Enable unicast block header retransmission. When `true`, `BlockAnnounce` frames trigger
+extraction and re-encoding of the 80-byte block header as a stripped BRC-131 frame.
+
+### `-header-egress-addr` / `HEADER_EGRESS_ADDR` (default: `127.0.0.1:9101`)
+
+Downstream unicast `host:port` for stripped block headers. Headers are sent as 172-byte
+BRC-131 frames (92-byte header + 80-byte block header payload).
+
+### `-header-egress-proto` / `HEADER_EGRESS_PROTO` (default: `udp`)
+
+Transport for unicast header egress: `udp` or `tcp`. TCP reconnects automatically on error.
+
+### `-header-mc-egress-enabled` / `HEADER_MC_EGRESS_ENABLED` (default: `false`)
+
+Enable multicast block header retransmission. When `true`, stripped block header frames
+are re-emitted to `CtrlGroupBlockHeader` (`FF0X::B:FFFA`). SPV consumers join this group
+rather than `CtrlGroupControl` (`FF0X::B:FFFE`) to receive headers only.
+
+### `-header-mc-egress-iface` / `HEADER_MC_EGRESS_IFACE` (default: same as `-iface`)
+
+Network interface for multicast header send (`IPV6_MULTICAST_IF`).
+
+### `-header-mc-egress-port` / `HEADER_MC_EGRESS_PORT` (default: same as `-listen-port`)
+
+UDP destination port for multicast header datagrams.
+
+### `-header-mc-egress-scope` / `HEADER_MC_EGRESS_SCOPE` (default: same as `-scope`)
+
+Multicast scope for the header egress group. Use a narrower scope than the data plane if
+SPV consumers are on a separate L2 segment.
+
+### `-header-mc-egress-hoplimit` / `HEADER_MC_EGRESS_HOPLIMIT` (default: `1`)
+
+`IPV6_MULTICAST_HOPS` for header egress datagrams. The default `1` confines headers to the
+directly attached segment.
+
+---
+
 ## NACK / Gap Recovery
 
 Gap tracking is performed for BRC-124/BRC-128 frames where `SeqNum` (bytes 48–55) is
@@ -262,7 +310,7 @@ used by the retry endpoints.
 ## Subtree Group Announcements (BRC-127)
 
 When configured, the listener joins the `CtrlGroupSubtreeAnnounce`
-(`0xFFFC`) control-plane multicast group and receives `SubtreeAnnounce`
+(`0xFFFB`) control-plane multicast group and receives `SubtreeAnnounce`
 datagrams from block assemblers (via the proxy TCP ingress). Announced
 SubtreeIDs are added to a dynamic registry with TTL-based eviction. The
 filter treats registry membership as an additional pass condition alongside
@@ -304,6 +352,30 @@ Empty means accept all senders not matched by `-sender-exclude`.
 
 Comma-separated IPv6 addresses or CIDRs to reject. Checked before
 `-sender-include`. Empty means exclude nothing.
+
+---
+
+## BRC-132 Subtree Data Reception
+
+BRC-132 carries subtree-level Merkle data (hashes or full nodes) for a given Bitcoin block
+subtree. Subtree data frames arrive on `CtrlGroupSubtreeAnnounce` (`FF0X::B:FFFB`), which
+the listener joins only when enabled. They bypass shard/subtree filtering and are forwarded
+directly to the configured egress endpoint. Gap tracking runs on a per-subtree flow so that
+NACK retransmission can recover lost fragments independently for each subtree.
+
+### `-subtree-data-enabled` / `SUBTREE_DATA_ENABLED` (default: `false`)
+
+Enable BRC-132 subtree data reception. When `true`, the listener joins
+`CtrlGroupSubtreeAnnounce` (`0xFFFB`) in addition to its shard groups and `CtrlGroupControl`.
+When `false` (the default), the group is not joined and BRC-132 frames are never received.
+
+### `-subtree-data-verify-merkle` / `SUBTREE_DATA_VERIFY_MERKLE` (default: `false`)
+
+Enable optional post-reassembly Merkle root verification for BRC-132 fragments. When `true`,
+after all fragments of a subtree data payload are reassembled, the listener verifies that the
+reassembled payload is consistent with the SubtreeID (Merkle root). Applies only to
+fragmented subtree data; inline unfragmented frames are not verified. This check is
+computationally expensive and should be disabled unless data integrity verification is required.
 
 ---
 
