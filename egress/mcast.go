@@ -123,6 +123,18 @@ func (s *MCastSender) Send(raw []byte, f *frame.Frame, groupIdx uint32) error {
 	return unix.Sendto(s.fd, buf, 0, &sa)
 }
 
+// SendToGroup forwards buf to the multicast group at the given control
+// group index. Unlike Send, no frame decoding or strip-header logic is
+// applied — buf is sent verbatim. The destination address is derived
+// from the pre-filled template with groupIdx in bytes 14-15.
+func (s *MCastSender) SendToGroup(buf []byte, groupIdx uint16) error {
+	s.addrTemplate[14] = byte(groupIdx >> 8)
+	s.addrTemplate[15] = byte(groupIdx)
+	sa := unix.SockaddrInet6{Port: s.egressPort}
+	copy(sa.Addr[:], s.addrTemplate[:])
+	return unix.Sendto(s.fd, buf, 0, &sa)
+}
+
 // Proto returns the egress protocol identifier used in metrics labels.
 func (s *MCastSender) Proto() string { return "udp-mcast" }
 

@@ -57,6 +57,8 @@ type Worker struct {
 	filt              *filter.Filter
 	egr               *egress.Sender
 	mcastEgr          *egress.MCastSender // nil when multicast egress is disabled
+	headerEgr         *egress.Sender      // nil when unicast header egress is disabled
+	headerMCastEgr    *egress.MCastSender // nil when multicast header egress is disabled
 	tracker           *nack.Tracker
 	rec               *metrics.Recorder
 	debug             bool
@@ -112,6 +114,17 @@ func New(
 		log:      slog.Default().With("component", "listener", "worker", id),
 	}
 }
+
+// SetHeaderEgress attaches a unicast sender for stripped block header
+// retransmission. When set, BlockAnnounce frames trigger extraction of
+// the 80-byte block header and re-encoding as a 172-byte stripped
+// BRC-131 frame sent to the configured downstream. nil disables.
+func (w *Worker) SetHeaderEgress(s *egress.Sender) { w.headerEgr = s }
+
+// SetHeaderMCastEgress attaches a multicast sender for stripped block
+// header retransmission to the CtrlGroupBlockHeader (0xFFFA) multicast
+// group. nil disables.
+func (w *Worker) SetHeaderMCastEgress(s *egress.MCastSender) { w.headerMCastEgr = s }
 
 // SetVerifyPayloadHash toggles SHA256d(payload)==TxID verification on
 // BRC-124/BRC-128 frames. When true, frames whose payload hash does not match
@@ -365,6 +378,11 @@ func (w *Worker) processBlockFrame(raw []byte) {
 		}
 	}
 
+	// Block header egress: extract and retransmit the 80-byte header.
+	if w.headerEgr != nil || w.headerMCastEgr != nil {
+		w.emitBlockHeader(bf)
+	}
+
 	// Gap tracking on the control flow uses a zero SubtreeID.
 	if w.tracker != nil && bf.SeqNum != 0 {
 		var zeroSub [32]byte
@@ -377,6 +395,59 @@ func (w *Worker) processBlockFrame(raw []byte) {
 			"content_id", fmt.Sprintf("%x", bf.ContentID[:8]),
 			"seq_num", bf.SeqNum,
 		)
+	}
+}
+
+// emitBlockHeader extracts the 80-byte block header from a BlockAnnounce
+// payload, re-encodes it as a stripped BRC-131 frame (92B header + 80B
+// payload = 172B), and sends it to configured header egress endpoints.
+// The BRC-131 header preserves ContentID (block hash), HashKey (sender
+// attribution), and SeqNum (per-sender ordering) so downstream SPV
+// consumers can track multiple chain tips from competing miners.
+func (w *Worker) emitBlockHeader(bf *frame.BlockFrame) {
+	if bf.MsgType != frame.BlockMsgAnnounce {
+		return
+	}
+	if len(bf.Payload) < frame.BlockHeaderSize {
+		return
+	}
+
+	// Build a stripped BlockFrame: payload = just the 80-byte header.
+	stripped := &frame.BlockFrame{
+		MsgType:   bf.MsgType,
+		ContentID: bf.ContentID,
+		HashKey:   bf.HashKey,
+		SeqNum:    bf.SeqNum,
+		Payload:   bf.Payload[:frame.BlockHeaderSize],
+	}
+	buf := make([]byte, frame.HeaderSize+frame.BlockHeaderSize)
+	if _, err := frame.EncodeBlock(stripped, buf); err != nil {
+		w.log.Debug("header egress encode error", "err", err)
+		return
+	}
+
+	// Unicast header egress.
+	if w.headerEgr != nil {
+		if err := w.headerEgr.SendRaw(buf); err != nil {
+			if w.rec != nil {
+				w.rec.HeaderEgressError(w.id)
+			}
+			w.log.Debug("header egress send error", "err", err)
+		} else if w.rec != nil {
+			w.rec.HeaderForwarded(w.id)
+		}
+	}
+
+	// Multicast header egress.
+	if w.headerMCastEgr != nil {
+		if err := w.headerMCastEgr.SendToGroup(buf, shard.CtrlGroupBlockHeader); err != nil {
+			if w.rec != nil {
+				w.rec.HeaderEgressError(w.id)
+			}
+			w.log.Debug("header mc egress send error", "err", err)
+		} else if w.rec != nil {
+			w.rec.HeaderForwarded(w.id)
+		}
 	}
 }
 
@@ -455,6 +526,11 @@ func (w *Worker) DeliverReassembledBlock(payload []byte, bf *frame.BlockFrame) {
 		if w.rec != nil {
 			w.rec.FrameForwarded(w.id, w.egr.Proto())
 		}
+	}
+
+	// Block header egress: extract and retransmit the 80-byte header.
+	if w.headerEgr != nil || w.headerMCastEgr != nil {
+		w.emitBlockHeader(bf)
 	}
 
 	if w.tracker != nil && bf.SeqNum != 0 {

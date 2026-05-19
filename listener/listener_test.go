@@ -380,6 +380,211 @@ func TestProcessFrame_VerifyEnabled_BRC12Bypassed(t *testing.T) {
 	}
 }
 
+// buildBlockAnnounceFrame constructs a BRC-131 BlockAnnounce frame with a valid
+// 80-byte block header as the first portion of the payload. contentIDByte sets
+// byte 0 of the ContentID. hashKey and seqNum are stamped into the BRC-131 header.
+func buildBlockAnnounceFrame(t *testing.T, contentIDByte byte, hashKey, seqNum uint64) []byte {
+	t.Helper()
+	// Build a BlockAnnouncePayload: 80B header + 32B coinbase TxID + 4B subtree count (0).
+	var hdr [80]byte
+	hdr[0] = 0x01 // block version byte
+	var coinbaseTxID [32]byte
+	coinbaseTxID[0] = 0xCC
+	announce := &frame.BlockAnnouncePayload{
+		Header:       hdr,
+		CoinbaseTxID: coinbaseTxID,
+	}
+	payload := frame.EncodeBlockAnnounce(announce)
+
+	var contentID [32]byte
+	contentID[0] = contentIDByte
+	bf := &frame.BlockFrame{
+		MsgType:   frame.BlockMsgAnnounce,
+		ContentID: contentID,
+		HashKey:   hashKey,
+		SeqNum:    seqNum,
+		Payload:   payload,
+	}
+	buf := make([]byte, frame.HeaderSize+len(payload))
+	if _, err := frame.EncodeBlock(bf, buf); err != nil {
+		t.Fatal(err)
+	}
+	return buf
+}
+
+// buildBlockCoinbaseFrame constructs a BRC-131 BlockMsgCoinbase frame.
+func buildBlockCoinbaseFrame(t *testing.T, contentIDByte byte) []byte {
+	t.Helper()
+	payload := []byte("raw-coinbase-tx")
+	var contentID [32]byte
+	contentID[0] = contentIDByte
+	bf := &frame.BlockFrame{
+		MsgType:   frame.BlockMsgCoinbase,
+		ContentID: contentID,
+		Payload:   payload,
+	}
+	buf := make([]byte, frame.HeaderSize+len(payload))
+	if _, err := frame.EncodeBlock(bf, buf); err != nil {
+		t.Fatal(err)
+	}
+	return buf
+}
+
+func TestProcessBlockFrame_HeaderEgress_Unicast(t *testing.T) {
+	// Main egress sink.
+	mainAddr, _, mainCleanup := newSink(t)
+	defer mainCleanup()
+
+	// Header egress sink.
+	hdrAddr, hdrCh, hdrCleanup := newSink(t)
+	defer hdrCleanup()
+
+	filt := filter.New(nil, nil, nil, nil)
+	w := newWorker(t, mainAddr, filt)
+
+	hdrEgr, err := egress.New(hdrAddr, "udp", false)
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = hdrEgr.Close() })
+	w.SetHeaderEgress(hdrEgr)
+
+	raw := buildBlockAnnounceFrame(t, 0xAA, 0xDEADBEEF, 42)
+	w.processBlockFrame(raw)
+
+	// Expect a 172-byte stripped BRC-131 on the header egress.
+	select {
+	case got := <-hdrCh:
+		expectedLen := frame.HeaderSize + frame.BlockHeaderSize // 92 + 80 = 172
+		if len(got) != expectedLen {
+			t.Fatalf("header egress: got %d bytes, want %d", len(got), expectedLen)
+		}
+		// Decode and verify fields are preserved.
+		decoded, err := frame.DecodeBlock(got)
+		if err != nil {
+			t.Fatalf("decode stripped header: %v", err)
+		}
+		if decoded.MsgType != frame.BlockMsgAnnounce {
+			t.Errorf("MsgType = 0x%02X, want 0x01", decoded.MsgType)
+		}
+		if decoded.ContentID[0] != 0xAA {
+			t.Errorf("ContentID[0] = 0x%02X, want 0xAA", decoded.ContentID[0])
+		}
+		if decoded.HashKey != 0xDEADBEEF {
+			t.Errorf("HashKey = %x, want 0xDEADBEEF", decoded.HashKey)
+		}
+		if decoded.SeqNum != 42 {
+			t.Errorf("SeqNum = %d, want 42", decoded.SeqNum)
+		}
+		if len(decoded.Payload) != frame.BlockHeaderSize {
+			t.Errorf("Payload len = %d, want %d", len(decoded.Payload), frame.BlockHeaderSize)
+		}
+		// Verify the block header content is preserved.
+		if decoded.Payload[0] != 0x01 {
+			t.Errorf("block header version byte = 0x%02X, want 0x01", decoded.Payload[0])
+		}
+	case <-time.After(time.Second):
+		t.Fatal("timeout waiting for header egress")
+	}
+}
+
+func TestProcessBlockFrame_HeaderEgress_SkipsCoinbase(t *testing.T) {
+	mainAddr, _, mainCleanup := newSink(t)
+	defer mainCleanup()
+
+	hdrAddr, hdrCh, hdrCleanup := newSink(t)
+	defer hdrCleanup()
+
+	filt := filter.New(nil, nil, nil, nil)
+	w := newWorker(t, mainAddr, filt)
+
+	hdrEgr, err := egress.New(hdrAddr, "udp", false)
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = hdrEgr.Close() })
+	w.SetHeaderEgress(hdrEgr)
+
+	// Send a coinbase frame — should NOT produce header egress.
+	raw := buildBlockCoinbaseFrame(t, 0xBB)
+	w.processBlockFrame(raw)
+
+	select {
+	case <-hdrCh:
+		t.Fatal("coinbase frames must not produce header egress")
+	case <-time.After(150 * time.Millisecond):
+		// expected
+	}
+}
+
+func TestProcessBlockFrame_HeaderEgress_Disabled(t *testing.T) {
+	mainAddr, _, mainCleanup := newSink(t)
+	defer mainCleanup()
+
+	filt := filter.New(nil, nil, nil, nil)
+	w := newWorker(t, mainAddr, filt)
+	// No header egress set — should not panic or produce errors.
+
+	raw := buildBlockAnnounceFrame(t, 0xCC, 0, 1)
+	w.processBlockFrame(raw)
+	// No assertion needed — just verify no panic.
+}
+
+func TestDeliverReassembledBlock_HeaderEgress(t *testing.T) {
+	mainAddr, _, mainCleanup := newSink(t)
+	defer mainCleanup()
+
+	hdrAddr, hdrCh, hdrCleanup := newSink(t)
+	defer hdrCleanup()
+
+	filt := filter.New(nil, nil, nil, nil)
+	w := newWorker(t, mainAddr, filt)
+
+	hdrEgr, err := egress.New(hdrAddr, "udp", false)
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = hdrEgr.Close() })
+	w.SetHeaderEgress(hdrEgr)
+
+	// Build a BlockAnnounce payload.
+	var hdr [80]byte
+	hdr[0] = 0x02
+	announce := &frame.BlockAnnouncePayload{Header: hdr}
+	payload := frame.EncodeBlockAnnounce(announce)
+
+	var contentID [32]byte
+	contentID[0] = 0xDD
+	bf := &frame.BlockFrame{
+		MsgType:   frame.BlockMsgAnnounce,
+		ContentID: contentID,
+		HashKey:   0xFEED,
+		SeqNum:    7,
+		Payload:   payload,
+	}
+
+	w.DeliverReassembledBlock(payload, bf)
+
+	select {
+	case got := <-hdrCh:
+		if len(got) != frame.HeaderSize+frame.BlockHeaderSize {
+			t.Fatalf("reassembled header egress: got %d bytes, want %d", len(got), frame.HeaderSize+frame.BlockHeaderSize)
+		}
+		decoded, err := frame.DecodeBlock(got)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if decoded.ContentID[0] != 0xDD {
+			t.Errorf("ContentID[0] = 0x%02X, want 0xDD", decoded.ContentID[0])
+		}
+		if decoded.HashKey != 0xFEED {
+			t.Errorf("HashKey = %x, want 0xFEED", decoded.HashKey)
+		}
+	case <-time.After(time.Second):
+		t.Fatal("timeout waiting for reassembled header egress")
+	}
+}
+
 func TestNew_Construction(t *testing.T) {
 	eng := shard.New(0xFF05, shard.DefaultGroupID, 2)
 	filt := filter.New(nil, nil, nil, nil)

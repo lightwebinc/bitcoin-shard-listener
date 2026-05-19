@@ -66,6 +66,20 @@ func run() error {
 			"hoplimit", cfg.MCEgressHopLimit,
 		)
 	}
+	if cfg.HeaderEgressEnabled {
+		slog.Info("block header unicast egress enabled",
+			"addr", cfg.HeaderEgressAddr,
+			"proto", cfg.HeaderEgressProto,
+		)
+	}
+	if cfg.HeaderMCEgressEnabled {
+		slog.Info("block header multicast egress enabled",
+			"iface", cfg.HeaderMCEgressIface.Name,
+			"scope", cfg.HeaderMCEgressScope,
+			"port", cfg.HeaderMCEgressPort,
+			"hoplimit", cfg.HeaderMCEgressHopLimit,
+		)
+	}
 
 	rec, err := metrics.New(cfg.InstanceID, cfg.NumWorkers, cfg.OTLPEndpoint, cfg.OTLPInterval)
 	if err != nil {
@@ -207,7 +221,41 @@ func run() error {
 			defer func() { _ = mcastEgr.Close() }()
 		}
 
+		// Unicast header egress.
+		var headerEgr *egress.Sender
+		if cfg.HeaderEgressEnabled {
+			headerEgr, err = egress.New(cfg.HeaderEgressAddr, cfg.HeaderEgressProto, false)
+			if err != nil {
+				return fmt.Errorf("header egress worker %d: %w", i, err)
+			}
+			defer func() { _ = headerEgr.Close() }()
+		}
+
+		// Multicast header egress.
+		var headerMCastEgr *egress.MCastSender
+		if cfg.HeaderMCEgressEnabled {
+			headerMCastEgr, err = egress.NewMCast(
+				cfg.HeaderMCEgressPrefix,
+				cfg.HeaderMCEgressGroupID,
+				cfg.ShardBits,
+				cfg.HeaderMCEgressPort,
+				cfg.HeaderMCEgressIface,
+				cfg.HeaderMCEgressHopLimit,
+				false,
+			)
+			if err != nil {
+				return fmt.Errorf("header mc egress worker %d: %w", i, err)
+			}
+			defer func() { _ = headerMCastEgr.Close() }()
+		}
+
 		w := listener.New(i, cfg.Iface, cfg.ListenPort, groups, engine, filt, egr, mcastEgr, tracker, rec, cfg.Debug)
+		if headerEgr != nil {
+			w.SetHeaderEgress(headerEgr)
+		}
+		if headerMCastEgr != nil {
+			w.SetHeaderMCastEgress(headerMCastEgr)
+		}
 		w.SetVerifyPayloadHash(cfg.VerifyPayloadHash)
 		if cfg.EgressDedupCap > 0 {
 			w.SetEgressDedup(dedup.New(cfg.EgressDedupCap, cfg.EgressDedupTTL))

@@ -56,6 +56,10 @@ type Recorder struct {
 	framesDeduped               metric.Int64Counter // by worker; suppressed retransmit before egress
 	egressErrors                metric.Int64Counter
 
+	// Block header egress counters
+	headerForwarded    metric.Int64Counter
+	headerEgressErrors metric.Int64Counter
+
 	// Multicast egress counters
 	mcEgressErrors metric.Int64Counter
 
@@ -197,6 +201,14 @@ func New(instanceID string, numWorkers int, otlpEndpoint string, otlpInterval ti
 	}
 	if r.mcEgressErrors, err = meter.Int64Counter("bsl_mc_egress_errors_total",
 		metric.WithDescription("Errors sending to multicast egress")); err != nil {
+		return nil, err
+	}
+	if r.headerForwarded, err = meter.Int64Counter("bsl_header_forwarded_total",
+		metric.WithDescription("Block headers extracted and forwarded to header egress")); err != nil {
+		return nil, err
+	}
+	if r.headerEgressErrors, err = meter.Int64Counter("bsl_header_egress_errors_total",
+		metric.WithDescription("Errors sending to header egress downstream")); err != nil {
 		return nil, err
 	}
 	if r.gapsDetected, err = meter.Int64Counter("bsl_gaps_detected_total",
@@ -344,6 +356,20 @@ func (r *Recorder) EgressError(workerID int) {
 // MCEgressError records a send failure on the multicast egress path.
 func (r *Recorder) MCEgressError(workerID int) {
 	r.mcEgressErrors.Add(context.Background(), 1, metric.WithAttributes(
+		attribute.Int("worker", workerID),
+	))
+}
+
+// HeaderForwarded records a block header extracted and forwarded to header egress.
+func (r *Recorder) HeaderForwarded(workerID int) {
+	r.headerForwarded.Add(context.Background(), 1, metric.WithAttributes(
+		attribute.Int("worker", workerID),
+	))
+}
+
+// HeaderEgressError records a send failure on the header egress path.
+func (r *Recorder) HeaderEgressError(workerID int) {
+	r.headerEgressErrors.Add(context.Background(), 1, metric.WithAttributes(
 		attribute.Int("worker", workerID),
 	))
 }

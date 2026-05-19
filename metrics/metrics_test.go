@@ -51,6 +51,8 @@ func TestRecorder_AllCountersSafeToCall(t *testing.T) {
 	r.FrameForwarded(0, "udp")
 	r.EgressError(0)
 	r.MCEgressError(0)
+	r.HeaderForwarded(0)
+	r.HeaderEgressError(0)
 	r.GapDetected("brc124")
 	r.GapSuppressed("brc124")
 	r.NACKDispatched("brc124")

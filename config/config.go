@@ -23,6 +23,15 @@
 //	-mc-egress-scope      MC_EGRESS_SCOPE      (=scope)         Multicast scope for egress groups
 //	-mc-egress-group-id   MC_EGRESS_GROUP_ID   (=mc-group-id)   IANA group-id for egress groups
 //	-mc-egress-hoplimit   MC_EGRESS_HOPLIMIT   1                IPV6_MULTICAST_HOPS
+//	-header-egress-enabled       HEADER_EGRESS_ENABLED       false            Enable unicast block header retransmission
+//	-header-egress-addr          HEADER_EGRESS_ADDR          127.0.0.1:9101   Downstream unicast host:port for headers
+//	-header-egress-proto         HEADER_EGRESS_PROTO         udp              udp | tcp
+//	-header-mc-egress-enabled    HEADER_MC_EGRESS_ENABLED    false            Enable multicast block header retransmission
+//	-header-mc-egress-iface      HEADER_MC_EGRESS_IFACE      (=iface)         Output NIC for multicast header send
+//	-header-mc-egress-port       HEADER_MC_EGRESS_PORT       (=listen-port)   Egress group UDP port for headers
+//	-header-mc-egress-scope      HEADER_MC_EGRESS_SCOPE      (=scope)         Multicast scope for header egress
+//	-header-mc-egress-group-id   HEADER_MC_EGRESS_GROUP_ID   (=mc-group-id)   IANA group-id for header egress
+//	-header-mc-egress-hoplimit   HEADER_MC_EGRESS_HOPLIMIT   1                IPV6_MULTICAST_HOPS for headers
 //	-retry-endpoints      RETRY_ENDPOINTS                       Comma-separated host:port retry nodes
 //	-nack-jitter-max      NACK_JITTER_MAX      200ms            Max NACK suppression jitter
 //	-nack-backoff-max     NACK_BACKOFF_MAX      5s               Cap on exponential backoff per gap
@@ -109,6 +118,18 @@ type Config struct {
 	MCEgressGroupID  uint16
 	MCEgressHopLimit int
 
+	// Block header egress (SPV)
+	HeaderEgressEnabled    bool
+	HeaderEgressAddr       string
+	HeaderEgressProto      string // "udp" or "tcp"
+	HeaderMCEgressEnabled  bool
+	HeaderMCEgressIface    *net.Interface
+	HeaderMCEgressPort     int
+	HeaderMCEgressScope    string
+	HeaderMCEgressPrefix   uint16
+	HeaderMCEgressGroupID  uint16
+	HeaderMCEgressHopLimit int
+
 	// Beacon discovery (BRC-126)
 	BeaconEnabled bool
 	BeaconPort    int
@@ -177,6 +198,24 @@ func Load() (*Config, error) {
 		"IANA group-id for egress multicast groups (default: same as -mc-group-id)")
 	flag.IntVar(&c.MCEgressHopLimit, "mc-egress-hoplimit", envInt("MC_EGRESS_HOPLIMIT", 1),
 		"IPv6 multicast hop limit for egress datagrams (IPV6_MULTICAST_HOPS)")
+	flag.BoolVar(&c.HeaderEgressEnabled, "header-egress-enabled", envBool("HEADER_EGRESS_ENABLED", false),
+		"enable unicast block header retransmission (stripped BRC-131, 172 bytes per block)")
+	flag.StringVar(&c.HeaderEgressAddr, "header-egress-addr", envStr("HEADER_EGRESS_ADDR", "127.0.0.1:9101"),
+		"downstream unicast host:port for block header stream")
+	flag.StringVar(&c.HeaderEgressProto, "header-egress-proto", envStr("HEADER_EGRESS_PROTO", "udp"),
+		"block header egress protocol: udp | tcp")
+	flag.BoolVar(&c.HeaderMCEgressEnabled, "header-mc-egress-enabled", envBool("HEADER_MC_EGRESS_ENABLED", false),
+		"enable multicast block header retransmission to CtrlGroupBlockHeader (0xFFFA)")
+	headerMCEgressIfaceFlag := flag.String("header-mc-egress-iface", envStr("HEADER_MC_EGRESS_IFACE", ""),
+		"network interface for multicast header egress send (default: same as -iface)")
+	flag.IntVar(&c.HeaderMCEgressPort, "header-mc-egress-port", envInt("HEADER_MC_EGRESS_PORT", 0),
+		"UDP destination port for header egress multicast group (default: same as -listen-port)")
+	flag.StringVar(&c.HeaderMCEgressScope, "header-mc-egress-scope", envStr("HEADER_MC_EGRESS_SCOPE", ""),
+		"multicast scope for header egress: link | site | org | global (default: same as -scope)")
+	headerMCEgressGroupIDFlag := flag.String("header-mc-egress-group-id", envStr("HEADER_MC_EGRESS_GROUP_ID", ""),
+		"IANA group-id for header egress multicast (default: same as -mc-group-id)")
+	flag.IntVar(&c.HeaderMCEgressHopLimit, "header-mc-egress-hoplimit", envInt("HEADER_MC_EGRESS_HOPLIMIT", 1),
+		"IPv6 multicast hop limit for header egress datagrams (IPV6_MULTICAST_HOPS)")
 	retryFlag := flag.String("retry-endpoints", envStr("RETRY_ENDPOINTS", ""),
 		"comma-separated host:port of multicast-retry caching nodes")
 	flag.DurationVar(&c.NACKJitterMax, "nack-jitter-max", envDuration("NACK_JITTER_MAX", 200*time.Millisecond),
@@ -311,6 +350,49 @@ func Load() (*Config, error) {
 				return nil, fmt.Errorf("mc-egress-iface %q not found: %w", *mcEgressIfaceFlag, err)
 			}
 			c.MCEgressIface = mcIface
+		}
+	}
+
+	// Validate unicast header egress protocol.
+	if c.HeaderEgressEnabled {
+		if c.HeaderEgressProto != "udp" && c.HeaderEgressProto != "tcp" {
+			return nil, fmt.Errorf("header-egress-proto must be udp or tcp, got %q", c.HeaderEgressProto)
+		}
+	}
+
+	// Resolve multicast header egress parameters (only when enabled).
+	if c.HeaderMCEgressEnabled {
+		if c.HeaderMCEgressScope == "" {
+			c.HeaderMCEgressScope = c.MCScope
+		}
+		hdrPrefix, ok := Scopes[c.HeaderMCEgressScope]
+		if !ok {
+			return nil, fmt.Errorf("header-mc-egress-scope %q unknown; valid values: link, site, org, global", c.HeaderMCEgressScope)
+		}
+		c.HeaderMCEgressPrefix = hdrPrefix
+
+		if *headerMCEgressGroupIDFlag == "" {
+			c.HeaderMCEgressGroupID = c.MCGroupID
+		} else {
+			hgid, err := parseGroupID(*headerMCEgressGroupIDFlag)
+			if err != nil {
+				return nil, fmt.Errorf("invalid -header-mc-egress-group-id %q: %w", *headerMCEgressGroupIDFlag, err)
+			}
+			c.HeaderMCEgressGroupID = hgid
+		}
+
+		if c.HeaderMCEgressPort == 0 {
+			c.HeaderMCEgressPort = c.ListenPort
+		}
+
+		if *headerMCEgressIfaceFlag == "" {
+			c.HeaderMCEgressIface = c.Iface
+		} else {
+			hdrIface, err := net.InterfaceByName(*headerMCEgressIfaceFlag)
+			if err != nil {
+				return nil, fmt.Errorf("header-mc-egress-iface %q not found: %w", *headerMCEgressIfaceFlag, err)
+			}
+			c.HeaderMCEgressIface = hdrIface
 		}
 	}
 

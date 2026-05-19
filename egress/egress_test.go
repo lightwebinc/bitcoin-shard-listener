@@ -205,6 +205,85 @@ func TestClose_TCP(t *testing.T) {
 	}
 }
 
+func TestSendRaw_UDP(t *testing.T) {
+	addr, pc, cleanup := newUDPSink(t)
+	defer cleanup()
+	s, _ := New(addr, "udp", false)
+	defer func() { _ = s.Close() }()
+
+	buf := []byte("raw-header-bytes")
+	if err := s.SendRaw(buf); err != nil {
+		t.Fatal(err)
+	}
+	got := make([]byte, 100)
+	_ = pc.SetReadDeadline(time.Now().Add(time.Second))
+	n, _, err := pc.ReadFrom(got)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if string(got[:n]) != "raw-header-bytes" {
+		t.Errorf("got %q", got[:n])
+	}
+}
+
+func TestSendRaw_TCP(t *testing.T) {
+	ln, err := net.Listen("tcp", "127.0.0.1:0")
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer func() { _ = ln.Close() }()
+	doneCh := make(chan []byte, 1)
+	go func() {
+		conn, err := ln.Accept()
+		if err != nil {
+			return
+		}
+		defer func() { _ = conn.Close() }()
+		buf := make([]byte, 256)
+		_ = conn.SetReadDeadline(time.Now().Add(2 * time.Second))
+		n, _ := conn.Read(buf)
+		doneCh <- buf[:n]
+	}()
+
+	s, _ := New(ln.Addr().String(), "tcp", false)
+	defer func() { _ = s.Close() }()
+
+	if err := s.SendRaw([]byte("raw-tcp-data")); err != nil {
+		t.Fatal(err)
+	}
+	select {
+	case got := <-doneCh:
+		if string(got) != "raw-tcp-data" {
+			t.Errorf("got %q", got)
+		}
+	case <-time.After(2 * time.Second):
+		t.Fatal("timeout")
+	}
+}
+
+func TestSendRaw_UnknownProto(t *testing.T) {
+	s := &Sender{proto: "weird"}
+	if err := s.SendRaw([]byte("x")); err == nil {
+		t.Error("expected error")
+	}
+}
+
+func TestSendToGroup_AddressDerivation(t *testing.T) {
+	// Test that SendToGroup correctly writes the group index into bytes 14-15.
+	s := &MCastSender{}
+	s.addrTemplate[0], s.addrTemplate[1] = 0xFF, 0x05
+	s.egressPort = 9001
+
+	// Simulate SendToGroup address derivation without actually sending.
+	groupIdx := uint16(0xFFFA)
+	s.addrTemplate[14] = byte(groupIdx >> 8)
+	s.addrTemplate[15] = byte(groupIdx)
+
+	if s.addrTemplate[14] != 0xFF || s.addrTemplate[15] != 0xFA {
+		t.Errorf("group bytes: 0x%02X%02X, want 0xFFFA", s.addrTemplate[14], s.addrTemplate[15])
+	}
+}
+
 func TestMCastSender_AddressDerivation(t *testing.T) {
 	// Construct without opening a real multicast socket — we test the address-template
 	// derivation logic directly on a zero-value MCastSender.

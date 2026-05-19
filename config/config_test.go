@@ -164,6 +164,31 @@ func TestScopesMap(t *testing.T) {
 	}
 }
 
+func TestParseGroupID(t *testing.T) {
+	tests := []struct {
+		input string
+		want  uint16
+	}{
+		{"0x000B", 0x000B},
+		{"000B", 0x000B},
+		{"0xFFFA", 0xFFFA},
+		{"11", 11},
+	}
+	for _, tc := range tests {
+		got, err := parseGroupID(tc.input)
+		if err != nil {
+			t.Errorf("parseGroupID(%q): %v", tc.input, err)
+			continue
+		}
+		if got != tc.want {
+			t.Errorf("parseGroupID(%q) = 0x%04X, want 0x%04X", tc.input, got, tc.want)
+		}
+	}
+	if _, err := parseGroupID(""); err == nil {
+		t.Error("expected error for empty string")
+	}
+}
+
 func TestDefaultSubtreeGroupTTL(t *testing.T) {
 	if DefaultSubtreeGroupTTL != 900*time.Second {
 		t.Errorf("DefaultSubtreeGroupTTL = %v", DefaultSubtreeGroupTTL)

@@ -124,6 +124,19 @@ func (s *Sender) closeTCP() {
 	}
 }
 
+// SendRaw forwards an arbitrary byte buffer to the downstream. No
+// strip-header logic is applied — buf is sent verbatim.
+func (s *Sender) SendRaw(buf []byte) error {
+	switch s.proto {
+	case "udp":
+		return s.sendUDP(buf)
+	case "tcp":
+		return s.sendTCP(buf)
+	default:
+		return fmt.Errorf("egress: unknown protocol %q", s.proto)
+	}
+}
+
 // SendBlock forwards a BRC-131 block control frame to the downstream.
 // When stripHeader is true, only bf.Payload is sent; otherwise the full raw
 // wire buffer is forwarded.
